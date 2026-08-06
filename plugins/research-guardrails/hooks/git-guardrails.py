@@ -7,7 +7,13 @@ template's own conventions forbid — before they run, not after. Adapted
 from the `git-guardrails` pattern in mattpocock/skills, scoped so the
 normal workflow (`/commit` pushes, stages specific files) still works.
 
-Two checks, by tool:
+Three checks, by tool:
+
+  Bash — deny piping a download straight into a shell:
+    - curl/wget ... | bash|sh|zsh  (executes unreviewed remote code)
+    This cannot be expressed as a permission rule: Claude Code splits a
+    compound command on `|` and matches each subcommand independently, so
+    `Bash(curl * | bash)` never matches. The hook sees the raw string.
 
   Bash — deny destructive / convention-violating git:
     - git reset --hard            (silently discards work)
@@ -60,18 +66,64 @@ GIT_DENY = [
     (re.compile(r"\bgit\s+" + _GO + r"(checkout|restore)\s+(--\s+)?\.(?:\s|$)"),
      "Mass discard of working-tree changes is irreversible.",
      "Discard specific files, or `git stash` to keep them recoverable."),
+    # NOTE: merge / rebase / cherry-pick / revert / branch -D are deliberately
+    # NOT denied here. They are `ask` rules in ~/.claude/settings.json, so they
+    # prompt with the exact command instead of being refused outright. A hook
+    # deny beats an ask rule, so re-adding them here would silently kill those
+    # prompts. Gate them there, not here.
+    (re.compile(r"\bgit\s+" + _GO + r"filter-branch\b|\bgit\s+" + _GO + r"filter-repo\b"),
+     "History rewriting across the whole repository is effectively irreversible "
+     "once pushed.",
+     "Do this by hand, outside Claude Code, with a backup clone."),
 ]
 
 HARDCODED_PATH = re.compile(r"(/Users/[^/\s'\")]+|/home/[^/\s'\")]+|[A-Za-z]:\\\\Users\\\\[^\\\s'\"]+)")
 CODE_EXT = {".R", ".r", ".qmd", ".do", ".py", ".Rmd"}
 
+# Download piped straight into a shell. Permission rules cannot catch this
+# (compound commands are split on `|` and matched per-subcommand), so it is
+# enforced here, where the whole command string is visible.
+PIPE_TO_SHELL = re.compile(
+    r"\b(curl|wget|fetch)\b[^|;&]*\|\s*(sudo\s+)?(bash|sh|zsh|ksh|dash|python3?|perl|ruby)\b"
+)
 
-def deny(reason: str) -> None:
+
+def decide(decision: str, reason: str) -> None:
     json.dump({"hookSpecificOutput": {
         "hookEventName": "PreToolUse",
-        "permissionDecision": "deny",
+        "permissionDecision": decision,
         "permissionDecisionReason": reason,
     }}, sys.stdout)
+
+
+def deny(reason: str) -> None:
+    decide("deny", reason)
+
+
+def ask(reason: str) -> None:
+    decide("ask", reason)
+
+
+def is_recursive_rm(command: str) -> bool:
+    """True when any segment deletes a tree (-r / -R / --recursive).
+
+    Backstop for the `Bash(rm -r*)` ask rules, which match a literal prefix and
+    so miss split flags (`rm -f -r x`), the long form (`rm --recursive x`), and
+    unusual orderings. A plain `rm file.txt` is deliberately not caught — the
+    recursive flag is what turns a mistake into a lost directory.
+    """
+    for seg in re.split(r"\|\||&&|[|;\n]", command):
+        toks = seg.strip().split()
+        if "rm" not in toks:
+            continue
+        for t in toks[toks.index("rm") + 1:]:
+            if t == "--":          # end of options; rest are paths
+                break
+            if t == "--recursive":
+                return True
+            if re.fullmatch(r"-[A-Za-z]*[rR][A-Za-z]*", t):
+                return True
+    return False
 
 
 def main() -> int:
@@ -85,11 +137,23 @@ def main() -> int:
 
     if tool == "Bash":
         cmd = ti.get("command", "") or ""
+        if PIPE_TO_SHELL.search(cmd):
+            deny(
+                "Blocked by git-guardrails: piping a download directly into a shell "
+                "executes remote code that nobody has read. Download to a file, read "
+                "it, then run it deliberately. "
+                "(override: run it in a terminal yourself, outside Claude Code.)"
+            )
+            return 0
         for pat, reason, alt in GIT_DENY:
             if pat.search(cmd):
                 deny(f"Blocked by git-guardrails: {reason} {alt} "
                      f"(override: run it in a terminal yourself, outside Claude Code.)")
                 return 0
+        if is_recursive_rm(cmd):
+            ask("Recursive delete: this removes a directory tree, not a single "
+                "file. Check the target path before approving.")
+            return 0
         return 0
 
     if tool in ("Write", "Edit", "MultiEdit"):

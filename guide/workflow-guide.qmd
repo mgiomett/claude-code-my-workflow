@@ -1112,7 +1112,7 @@ The first four layers are your safety net. Anything written to disk survives ind
 
 The session log reminder above is one example of a broader pattern: using **hooks** to enforce rules that Claude might otherwise forget during long sessions. Rules live in context and can be compressed away. Hooks live in `.claude/settings.json` and fire every time, regardless of context state.
 
-The template includes 7 hooks for logging, notifications, context survival, and git safety (plus a real git pre-commit hook, `.githooks/pre-commit`, installed via `./scripts/install-hooks.sh`):
+The template includes 6 hooks for logging, notifications, and context survival (plus a real git pre-commit hook, `.githooks/pre-commit`, installed via `./scripts/install-hooks.sh`). Git-safety and resource guardrails now live in the machine-wide [`research-guardrails`](../plugins/research-guardrails/) plugin instead, installed once via `./scripts/link-plugin.sh`:
 
 | Hook | Event | What It Does |
 |------|-------|-------------|
@@ -2767,7 +2767,7 @@ Claude Code supports **plugins** --- bundled collections of skills, agents, hook
 | Context state capture | PreCompact (command) | `.claude/hooks/pre-compact.py` — DRAFT-block default is ON |
 | Context restoration | SessionStart[compact\|resume] (command) | `.claude/hooks/post-compact-restore.py` |
 | Context monitor | PostToolUse[Bash\|Task] (command) | `.claude/hooks/context-monitor.py` |
-| Git guardrails | PreToolUse (command) | `.claude/hooks/git-guardrails.py` — blocks `reset --hard` / `clean -f` / `push --force` / `add -A` |
+| Git guardrails | PreToolUse (command) | `plugins/research-guardrails/hooks/git-guardrails.py` — machine-wide via `./scripts/link-plugin.sh`; blocks destructive git and download-piped-to-shell, prompts on recursive delete |
 | Claim reconcile | PostToolUse (command) | `.claude/hooks/claim-reconcile.py` — flags stale numeric claims when scripts change |
 
 **Additional hook events** available in Claude Code (not used in this template but available for custom hooks):

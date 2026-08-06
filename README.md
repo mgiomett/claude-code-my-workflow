@@ -68,6 +68,47 @@ Then inside Claude:
 
 If both succeed, delete `Slides/HelloWorld.tex` and `Quarto/HelloWorld.qmd` and start on your real work.
 
+### 4. Install the gates (once per machine)
+
+```bash
+./scripts/install-hooks.sh          # Per-repo: pre-commit quality + surface-sync gates
+./scripts/link-plugin.sh            # Machine-wide: research-guardrails in every project
+```
+
+`install-hooks.sh` is per-clone. `link-plugin.sh` is per-machine: it symlinks
+[`plugins/research-guardrails/`](plugins/research-guardrails/) into `~/.claude/skills/`, where
+Claude Code auto-loads it for **every** project you open — so destructive-git and
+resource guardrails follow you into repos that have no `.claude/` of their own.
+
+Pair it with a user-level permission floor in `~/.claude/settings.json`. Rules are evaluated
+**deny → ask → allow**, and deny/ask/hooks apply in *every* permission mode (including
+`bypassPermissions`) while allow rules do not. That ordering is what lets the allow layer be
+wide: nothing in it can punch through the three layers above.
+
+```jsonc
+{
+  "permissions": {
+    "deny":  ["Read(~/.ssh/**)", "Read(//**/.env)", "Bash(sudo *)", "Edit(//usr/**)"],
+    "ask":   ["Bash(git merge *)", "Bash(rm -r*)", "Bash(gh repo delete *)"],
+    "allow": ["Bash", "Read(**)", "Edit(**)"]
+  }
+}
+```
+
+The design goal is **no per-project permission files at all.** An enumerated allow list
+can't reach it — every command it fails to anticipate becomes a prompt, and every prompt
+becomes a "don't ask again" entry in some project's `settings.local.json`. A blanket `Bash`
+allow plus a sharp deny list and hooks is the shape the
+[docs recommend](https://code.claude.com/docs/en/permissions#extend-permissions-with-hooks),
+and it leaves nothing to accrete.
+
+Three traps worth knowing: in **user** settings a `/path` rule anchors to `~/.claude/path`,
+not your project — use `//absolute`, `~/home`, or a bare relative glob (which is cwd-scoped);
+only `Read(path)` / `Edit(path)` are consulted for files, so `Write(...)`/`MultiEdit(...)`
+path rules are silently inert; and a **hook deny beats an ask rule**, so anything you want
+to *prompt* on must not also be denied in a hook. See the
+[plugin README](plugins/research-guardrails/README.md) for the limits of what this buys you.
+
 ---
 
 ## How It Works
@@ -76,7 +117,7 @@ If both succeed, delete `Slides/HelloWorld.tex` and `Quarto/HelloWorld.qmd` and 
 
 You don't craft a perfect prompt — you **state a goal and let the work loop toward it under gates**. Specialist agents do the labor; enforcing gates decide when it's good enough; you adjudicate the disagreements they surface. Three things make that trustworthy:
 
-- **Real gates, not reminders.** A version-controlled pre-commit hook (run `./scripts/install-hooks.sh` once) runs the surface-sync + quality (≥80) checks on *every* commit — bypassing the skill no longer bypasses the review. A `git-guardrails` hook blocks destructive git (`reset --hard`, `clean -f`, `push --force`, `add -A`); the review runtime re-checks any reviewer-introduced "fatal" finding before it counts.
+- **Real gates, not reminders.** A version-controlled pre-commit hook (run `./scripts/install-hooks.sh` once) runs the surface-sync + quality (≥80) checks on *every* commit — bypassing the skill no longer bypasses the review. The [`research-guardrails`](plugins/research-guardrails/) plugin (run `./scripts/link-plugin.sh` once) blocks destructive and history-rewriting git in *every* project on the machine, not just this one; the review runtime re-checks any reviewer-introduced "fatal" finding before it counts.
 - **A real orchestration runtime.** Reviews fan out to forked specialist agents, reduce over a shared finding schema, judge with a hallucination gate, and loop until dry — see [`orchestrator-protocol.md`](.claude/rules/orchestrator-protocol.md).
 - **Ground truth as a process.** A mismatch isn't always a failure: a defensible, *named* alternative is recorded as `EXPLAINED` and carried into your response-to-referees, while genuine errors stay fail-closed.
 
@@ -188,7 +229,7 @@ This workflow is designed as a **single hub for an entire research program** —
 ## What's Included
 
 <details>
-<summary><strong>18 agents, 52 skills, 32 rules, 7 hooks</strong> (click to expand)</summary>
+<summary><strong>18 agents, 52 skills, 32 rules, 6 hooks</strong> (click to expand)</summary>
 
 ### Agents (`.claude/agents/`)
 
