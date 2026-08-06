@@ -1,0 +1,10 @@
+{
+  "name": "research-guardrails",
+  "description": "Cross-project PreToolUse guardrails for research repositories: blocks destructive and history-rewriting git, warns on hardcoded machine paths in analysis code, and refuses to start work when the machine is out of disk or memory.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Marco Giometti"
+  },
+  "homepage": "https://github.com/pedrohcgs/claude-code-my-workflow",
+  "license": "MIT"
+}

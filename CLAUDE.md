@@ -64,7 +64,35 @@ python scripts/quality_score.py Quarto/file.qmd
 
 # Surface-count sync (README ↔ CLAUDE.md ↔ guide ↔ landing page)
 ./scripts/check-surface-sync.sh
+
+# One-time setup
+./scripts/install-hooks.sh          # per-clone: pre-commit gates
+./scripts/link-plugin.sh            # per-machine: research-guardrails in every project
 ```
+
+**Cross-project guardrails.** Four layers with different authority. Rules resolve
+**deny → ask → allow**; deny, ask, and hooks apply in *every* permission mode, allow rules
+only outside `bypassPermissions`. A hook's decision beats an allow rule but **not** a deny
+or ask rule.
+
+| Layer | Authority | Where it lives |
+|-------|-----------|----------------|
+| **Deny** | Absolute — credentials, OS paths, `sudo`, disk/system tools | `~/.claude/settings.json` |
+| **Ask** | Prompts — `git merge`/`rebase`/`branch -D`, `rm -r*`, `gh repo create/delete`, remote repointing | `~/.claude/settings.json` |
+| **Hooks** | Block with a reason; see the whole command | [`plugins/research-guardrails/`](plugins/research-guardrails/) → symlinked into `~/.claude/skills/` |
+| **Allow** | Convenience only — blanket `Bash`, `Read(**)`, `Edit(**)` | `~/.claude/settings.json` |
+
+Permission rules cannot ship in a plugin (a plugin's `settings.json` takes only `agent` and
+`subagentStatusLine`); hooks cannot live in user settings without breaking, because
+`$CLAUDE_PROJECT_DIR` resolves to whichever project is open. Hence two homes, not one.
+
+**Default to zero per-project permission rules.** The global layer is deliberately wide so
+projects need nothing of their own. Add a project-level rule only when the project genuinely
+requires it — and never a *broader* allow, since the global blanket already covers that.
+
+Two failure modes to avoid: copying a hook into a project's `.claude/hooks/` (that is how the
+copies drift — edit the plugin, then `/reload-plugins`), and denying in a hook something you
+also want to prompt on (the hook deny wins, and the ask rule silently never fires).
 
 **Palette contract:** color names in `Preambles/header.tex` must match SCSS variables in `Quarto/theme-template.scss`. See [`Preambles/README.md`](Preambles/README.md).
 
