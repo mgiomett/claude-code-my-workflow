@@ -37,6 +37,31 @@ All optional; defaults are sensible for a laptop.
 | `CLAUDE_HEAVY_MEM_MB` | `8192` | Heavy tier |
 | `CLAUDE_HEAVY_PATTERN` | `simulations/`, `sim_*`, `benchmark_*` | Regex selecting what counts as heavy. Set per project when your expensive work lives elsewhere (e.g. `analysis/`). A malformed regex falls back to the default rather than disabling the guard |
 
+## The permission floor that pairs with this
+
+This plugin supplies the *hooks*. The other half — the deny / ask / allow rules — cannot
+ship in a plugin (a plugin's `settings.json` accepts only `agent` and `subagentStatusLine`),
+so it lives in `~/.claude/settings.json`. A working copy is committed here as
+[`global-settings.example.json`](global-settings.example.json): 67 deny rules (credentials,
+OS paths, `sudo`, disk and system tools), 14 ask rules (git history operations, recursive
+delete, `gh repo`/`release`, remote repointing), and a deliberately wide allow layer.
+
+Install or restore it with:
+
+```bash
+cp plugins/research-guardrails/global-settings.example.json ~/.claude/settings.json
+```
+
+Review it first — it is a starting point, not a mandate, and the cosmetic keys (`theme`,
+notification toggles) are personal preference rather than part of the floor.
+
+**Keeping the copy current:** this file is a snapshot, not a symlink. After changing
+`~/.claude/settings.json`, refresh it with the reverse copy and commit:
+
+```bash
+cp ~/.claude/settings.json plugins/research-guardrails/global-settings.example.json
+```
+
 ## Install
 
 From the repository root:
