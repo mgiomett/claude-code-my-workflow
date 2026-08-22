@@ -1,0 +1,10 @@
+{
+  "dep_vars": ["y", "y"],
+  "terms": ["x1"],
+  "est": [[1.25, 1.31]],
+  "unc": [[0.4, 0.42]],
+  "fe": {},
+  "uncertainty_type": "unknown",
+  "confidence": 0.9,
+  "flags": ["uncertainty type not stated in table notes"]
+}

@@ -1,0 +1,10 @@
+{
+  "name": "table-extract",
+  "description": "Deterministic extraction of regression tables from LaTeX (and paired analysis logs) into a compact coefficient store, so a high-tier model reads a projection instead of raw table source.",
+  "version": "1.0.0",
+  "author": {
+    "name": "Marco Giometti"
+  },
+  "homepage": "https://github.com/pedrohcgs/claude-code-my-workflow",
+  "license": "MIT"
+}

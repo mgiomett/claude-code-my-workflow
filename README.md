@@ -72,11 +72,11 @@ If both succeed, delete `Slides/HelloWorld.tex` and `Quarto/HelloWorld.qmd` and 
 
 ```bash
 ./scripts/install-hooks.sh          # Per-repo: pre-commit quality + surface-sync gates
-./scripts/link-plugin.sh            # Machine-wide: research-guardrails in every project
+./scripts/link-plugin.sh            # Machine-wide: plugins/ (guardrails + skills) in every project
 ```
 
 `install-hooks.sh` is per-clone. `link-plugin.sh` is per-machine: it symlinks
-[`plugins/research-guardrails/`](plugins/research-guardrails/) into `~/.claude/skills/`, where
+every directory under [`plugins/`](plugins/) into `~/.claude/skills/`, where
 Claude Code auto-loads it for **every** project you open — so destructive-git and
 resource guardrails follow you into repos that have no `.claude/` of their own.
 

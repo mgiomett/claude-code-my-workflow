@@ -1,0 +1,18 @@
+% Grouped \multicolumn header plus sparse (IV-style) coefficient cells.
+\begin{tabular}{l*{4}{c}}
+\toprule
+       &\multicolumn{2}{c}{First stage}&\multicolumn{2}{c}{Second stage}\\
+\cmidrule(lr){2-3}\cmidrule(lr){4-5}
+       &\multicolumn{1}{c}{(1)}&\multicolumn{1}{c}{(2)}&\multicolumn{1}{c}{(3)}&\multicolumn{1}{c}{(4)}\\
+       &\multicolumn{1}{c}{shock}&\multicolumn{1}{c}{shock}&\multicolumn{1}{c}{rate}&\multicolumn{1}{c}{rate}\\
+\midrule
+instrument & 0.8100*** & 0.7900*** &          &          \\
+           & (0.1100)  & (0.1200)  &          &          \\
+\addlinespace
+fitted     &           &           & -1.0170* & -0.8020* \\
+           &           &           & (0.5440) & (0.4180) \\
+\midrule
+Observations & 9,100 & 9,100 & 9,100 & 9,100 \\
+\bottomrule
+\multicolumn{5}{l}{\footnotesize Robust standard errors in parentheses}\\
+\end{tabular}

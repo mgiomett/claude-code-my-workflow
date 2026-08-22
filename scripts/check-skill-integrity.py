@@ -154,10 +154,22 @@ def tools_invoked_in_body(body: str) -> set[str]:
     return found
 
 
+def skill_files() -> list[Path]:
+    """Every SKILL.md subject to parity checks.
+
+    Includes plugin-hosted skills: `plugins/*/skills/*/SKILL.md` ships to
+    every project via link-plugin.sh, so it needs the same frontmatter/body
+    parity guarantees as an in-repo skill. (Surface-SYNC deliberately does
+    NOT count these — a plugin skill is outside the README/guide totals.)
+    """
+    return sorted(REPO.glob(".claude/skills/*/SKILL.md")) + sorted(
+        REPO.glob("plugins/*/skills/*/SKILL.md"))
+
+
 def check_tool_parity() -> list[tuple[str, str, str]]:
     """Return list of (severity, file, msg)."""
     findings: list[tuple[str, str, str]] = []
-    for skill_md in sorted(REPO.glob(".claude/skills/*/SKILL.md")):
+    for skill_md in skill_files():
         try:
             text = skill_md.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as e:
@@ -230,7 +242,7 @@ def check_flag_parity() -> list[tuple[str, str, str]]:
     # documentation context (option-keywords) would double-fail many legit
     # skills that list flags only in a reference table without option verbs.
     any_code_flag_re = re.compile(r"`(--[a-z][a-z0-9-]*)`")
-    for skill_md in sorted(REPO.glob(".claude/skills/*/SKILL.md")):
+    for skill_md in skill_files():
         try:
             text = skill_md.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as e:

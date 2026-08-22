@@ -1,0 +1,12 @@
+{
+  "spec_labels": ["(1)", "(2)", "(3)"],
+  "dep_vars": ["log_wage", "log_wage", "emp"],
+  "terms": ["treat", "post"],
+  "est": [[0.342, 0.298, 0.115], [-0.045, -0.051, null]],
+  "unc": [[0.091, 0.088, 0.052], [0.033, 0.029, null]],
+  "stars": [[3, 3, 2], [0, 1, 0]],
+  "fe": {"Firm FE": [1, 1, 1], "Year FE": [0, 1, 1]},
+  "uncertainty_type": "se",
+  "n_cols": 3,
+  "confidence": 1.0
+}
