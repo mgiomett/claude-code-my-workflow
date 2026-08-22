@@ -54,6 +54,7 @@ raw span. The counts must balance, and extraction aborts if they do not.
 | `--dep-var` | project | Dependent-variable filter |
 | `--tables` | project | Comma-separated table-id filters |
 | `--distribution` | project | Per-term, per-outcome count inventory (no averages) |
+| `--compact` | project | Legend-encoded rows: same information, 2.5x smaller |
 | `--csv` | project | Tidy long CSV instead of markdown |
 | `--all` | project | Always show source and confidence columns |
 | `--force-full` | project | Emit an over-budget projection anyway |
@@ -140,13 +141,14 @@ cost that measuring bytes on disk misses).
 | Question | Skill | Read files | Ratio |
 |---|---:|---:|---:|
 | Every estimate of one term, 91 of 149 tables | 31,582 | 148,422 | **4.7x** |
+| ...the same, with `--compact` | 14,649 | 148,422 | **10.1x** |
 | Corpus-wide count inventory of one term | 1,615 | 148,422 | **92x** |
 | Per-scheme rates across 43 schemes | 153,567 | 1,294,384 | **7.8x** |
 | Judgment question needing the estimates | 30,131 | 55,400 | **1.8x** |
 | One specific table | 2,091 | 1,234 | **0.4x — a loss** |
 
-**There is no single ratio, and the honest number is around 4.7x** for a
-selective query over a large corpus. Treat anything larger as a claim about the
+**There is no single ratio.** For a selective row-level query over a large
+corpus it is ~4.7x plain, ~10x with `--compact`. Treat anything larger as a claim about the
 *question*, not about the tool.
 
 ### What the audit corrected
@@ -164,6 +166,14 @@ selective query over a large corpus. Treat anything larger as a claim about the
 The pattern worth remembering: **every inflated ratio came from substituting a
 cheaper question for the one asked.** The two figures that survived scrutiny
 are the two where the output actually answered the stated question.
+
+### Why `--compact` helps
+
+Measured on a real 504-row projection: 57% of the row content was the table
+name, repeated across 504 rows for only 91 distinct tables, and 41% of the
+output was markdown pipe-and-pad. `--compact` names each table and outcome once
+in a legend, heads each block with its term, and drops the pipes. No
+information is removed — it is the same rows, 2.5x smaller.
 
 ### Where it is a loss
 

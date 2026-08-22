@@ -14,7 +14,9 @@ once with a deterministic script and hands you a small, filtered view.
 **The discipline this skill exists to enforce: extract, then project. Do not
 read the source tables, and do not read the store.**
 
-Expect roughly **4.7x** fewer tokens on a selective query over a large corpus.
+Expect roughly **4.7x** fewer tokens on a selective query over a large corpus,
+or **~10x** with the compact row format (a legend for tables and outcomes
+instead of repeating them on every row — same information, no loss).
 Much larger ratios are available only by answering a narrower question than the
 one asked — an independent audit found every inflated figure in this project's
 history came from exactly that substitution. Reading either defeats

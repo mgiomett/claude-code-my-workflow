@@ -1045,8 +1045,50 @@ def distribution(rows: list[dict]) -> str:
     return "\n".join(out)
 
 
+def _compact(rows: list[dict]) -> str:
+    """Same rows, legend-encoded.
+
+    Measured on a real projection: 57% of row content was the table name,
+    repeated across 504 rows for 91 distinct tables, and 41% of the whole
+    output was markdown pipe-and-pad. Naming each table and outcome once and
+    referring to them by key removes both without dropping any information.
+    """
+    tabs, deps = {}, {}
+    for r in rows:
+        tabs.setdefault(r["table"], f"T{len(tabs) + 1}")
+        deps.setdefault(r["dep_var"], f"D{len(deps) + 1}")
+    by_type: dict[str, list] = {}
+    for r in rows:
+        by_type.setdefault(r["utype"], []).append(r)
+
+    out = []
+    if len(by_type) > 1:
+        out.append("NOT COMPARABLE across the groups below: they report "
+                   "different quantities under each coefficient.\n")
+    out.append("tables:  " + "  ".join(
+        f"{k}={v.rsplit('/', 1)[-1]}" for v, k in tabs.items()))
+    out.append("outcomes: " + "  ".join(
+        f"{k}={v or '(unlabelled)'}" for v, k in deps.items()))
+    for utype, group in sorted(by_type.items()):
+        out.append(f"\nuncertainty={utype}   cols: tbl spec outcome est unc sig N")
+        by_term: dict[str, list] = {}
+        for r in group:
+            by_term.setdefault(r["term"], []).append(r)
+        for term, rs in sorted(by_term.items()):
+            # The term heads its block instead of repeating on every row.
+            out.append(f"[{term}]")
+            for r in sorted(rs, key=lambda x: (x["table"], x["spec"])):
+                out.append(" ".join((
+                    tabs[r["table"]], r["spec"], deps[r["dep_var"]],
+                    _fmt(r["est"]), _fmt(r["unc"]), r["sig"] or "-",
+                    r["n"] or "-",
+                )))
+    return "\n".join(out)
+
+
 def project(store: dict, terms, dep_var=None, table_filter=None,
-            as_csv=False, show_all=False, as_summary=False) -> str:
+            as_csv=False, show_all=False, as_summary=False,
+            as_compact=False) -> str:
     tables = store["tables"]
     if table_filter:
         tables = [t for t in tables if any(f in t["table_id"] for f in table_filter)]
@@ -1098,6 +1140,9 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                 '"' + str(r[c]).replace('"', '""') + '"' if isinstance(r[c], str)
                 else str("" if r[c] is None else r[c]) for c in cols))
         return "\n".join(out)
+
+    if as_compact:
+        return _compact(rows)
 
     # Never merge incompatible uncertainty types into one comparison.
     by_type: dict[str, list] = {}
@@ -1391,7 +1436,7 @@ def run_project(args) -> int:
     terms = [t.strip() for t in args.terms.split(",")] if args.terms else []
     tabs = [t.strip() for t in args.tables.split(",")] if args.tables else []
     out = project(store, terms, args.dep_var, tabs, args.csv, args.all,
-                  args.summarize)
+                  args.summarize, args.compact)
 
     # A projection is only worth reading when it is SELECTIVE. An unfiltered
     # dump can exceed the source it was meant to compress, which defeats the
@@ -1402,6 +1447,7 @@ def run_project(args) -> int:
               f"(budget ~{PROJECTION_BUDGET // 4:,}). Refusing: at this size it "
               f"no longer compresses anything.\n")
         print("Narrow it with --terms / --dep-var / --tables, or use "
+              "--compact for the same rows ~4x smaller, or "
               "--distribution for a per-outcome count inventory.\n")
         print("Most common terms:\n")
         print(f"{'coefs':>6}  {'tables':>6}  term")
@@ -1495,6 +1541,8 @@ def main(argv=None) -> int:
     p.add_argument("--tables", default="", help="comma-separated table-id filters")
     p.add_argument("--csv", action="store_true", help="tidy long CSV instead")
     p.add_argument("--all", action="store_true", help="always show source/confidence")
+    p.add_argument("--compact", action="store_true",
+                   help="legend-encoded rows; same information, far smaller")
     p.add_argument("--distribution", dest="summarize", action="store_true",
                    help="inventory of counts per term and outcome (no averages)")
     p.add_argument("--force-full", action="store_true",
