@@ -444,5 +444,101 @@ class TestLogEnrichment(unittest.TestCase):
         self.assertIsNone(pt.fingerprint_match(table, blocks))
 
 
+class TestGroupBy(unittest.TestCase):
+    """Comparing one term across files/dirs/vintages was the one question the
+    tool could not express, so it kept being answered with throwaway code --
+    which is where every analysis error came from."""
+
+    def _store(self):
+        def t(tid, est):
+            return {"table_id": tid, "terms": ["treat"], "est": [[est]],
+                    "unc": [[0.1]], "stars": [[1]], "n_cols": 1,
+                    "spec_labels": ["(1)"], "dep_vars": ["y"], "stats": {},
+                    "uncertainty_type": "se", "source_type": "tex",
+                    "confidence": 1.0, "notes": "SEs in parentheses",
+                    "flags": []}
+        return {"schema": 1, "residue": [], "files": {}, "tables": [
+            t("v1/a.tex#t0", 0.5), t("v1/b.tex#t0", 0.6), t("v2/a.tex#t0", 0.7)]}
+
+    def test_group_by_dir_splits_vintages(self):
+        out = pt.project(self._store(), ["treat"], group_by="dir")
+        self.assertIn("Grouped by dir: 2 group(s)", out)
+        self.assertIn("## v1", out)
+        self.assertIn("## v2", out)
+
+    def test_group_by_file_splits_schemes(self):
+        out = pt.project(self._store(), ["treat"], group_by="file")
+        self.assertIn("Grouped by file: 2 group(s)", out)
+
+    def test_grouping_never_loses_or_duplicates_a_coefficient(self):
+        store = self._store()
+        for mode in pt.GROUP_KEYS:
+            out = pt.project(store, ["treat"], group_by=mode)
+            self.assertIn("3 coefficient(s).", out, mode)
+
+    def test_unknown_key_is_refused_not_ignored(self):
+        out = pt.project(self._store(), ["treat"], group_by="colour")
+        self.assertIn("Unknown --group-by", out)
+
+    def test_shared_path_prefix_is_printed_once(self):
+        store = self._store()
+        for t in store["tables"]:
+            t["table_id"] = "/very/long/shared/root/" + t["table_id"]
+        out = pt.project(store, ["treat"], group_by="dir")
+        self.assertIn("paths relative to", out)
+        self.assertNotIn("## /very/long/shared/root/v1", out)
+
+
+class TestNotes(unittest.TestCase):
+    """The store always carried notes; nothing surfaced them, so "what do the
+    table notes say" needed the source file."""
+
+    def _store(self, note, flags=()):
+        return {"schema": 1, "residue": [], "files": {}, "tables": [{
+            "table_id": "a.tex#t0", "terms": ["treat"], "est": [[0.5]],
+            "unc": [[0.1]], "stars": [[1]], "n_cols": 1, "spec_labels": ["(1)"],
+            "dep_vars": ["y"], "stats": {}, "uncertainty_type": "se",
+            "source_type": "tex", "confidence": 1.0, "notes": note,
+            "flags": list(flags)}]}
+
+    def test_notes_absent_by_default(self):
+        out = pt.project(self._store("Robust SEs clustered by firm."), ["treat"])
+        self.assertNotIn("Table notes", out)
+
+    def test_notes_shown_on_request(self):
+        out = pt.project(self._store("Robust SEs clustered by firm."), ["treat"],
+                         show_notes=True)
+        self.assertIn("Table notes", out)
+        self.assertIn("clustered by firm", out)
+
+    def test_flags_surface_with_notes(self):
+        out = pt.project(self._store("", ["stacked panels: stats dropped"]),
+                         ["treat"], show_notes=True)
+        self.assertIn("stacked panels", out)
+
+
+class TestDialectProbe(unittest.TestCase):
+    """The worst shipped bug was silent because nothing reported which markup
+    a corpus used; an unsupported convention could only be found by its damage."""
+
+    def _hits(self, text):
+        return [n for n, pat in pt.DIALECT_PROBES if pat.search(text)]
+
+    def test_detects_each_star_convention(self):
+        self.assertIn("stars: \\sym{***}", self._hits(r"0.34\sym{***}"))
+        self.assertIn("stars: $^{***}$ / ^{***}", self._hits(r"0.34$^{***}$"))
+        self.assertIn("stars: bare ***", self._hits("0.34***"))
+        self.assertIn("stars: \\textsuperscript{***}",
+                      self._hits(r"0.34\textsuperscript{***}"))
+
+    def test_detects_delimiters_and_decimal_comma(self):
+        self.assertIn("uncertainty in ( )", self._hits("& (0.091)"))
+        self.assertIn("uncertainty in [ ]", self._hits("& [0.091]"))
+        self.assertIn("decimal comma", self._hits("& -0,342"))
+
+    def test_plain_prose_triggers_nothing(self):
+        self.assertEqual(self._hits("This table reports baseline results."), [])
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

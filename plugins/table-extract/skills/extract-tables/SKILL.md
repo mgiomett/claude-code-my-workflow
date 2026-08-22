@@ -79,6 +79,16 @@ python3 "$CLAUDE_PLUGIN_ROOT/scripts/parse_tables.py" terms
 
 Lists distinct terms with occurrence counts. Do this before projecting.
 
+### 2b. Check the dialect on a corpus you have not parsed before
+
+```bash
+python3 "$CLAUDE_PLUGIN_ROOT/scripts/parse_tables.py" dialects path/to/tables
+```
+
+Names the star and delimiter conventions present, and flags any not covered by
+a golden fixture. Unsupported markup fails silently by nature — this is what
+makes it visible first.
+
 ### 3. Project
 
 ```bash

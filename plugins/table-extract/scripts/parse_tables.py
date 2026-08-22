@@ -1086,9 +1086,28 @@ def _compact(rows: list[dict]) -> str:
     return "\n".join(out)
 
 
+GROUP_KEYS = ("file", "dir", "table", "term", "dep_var")
+
+
+def group_key(row: dict, mode: str) -> str:
+    """The value a row is grouped under.
+
+    `table_id` already encodes the source path, so file- and directory-level
+    grouping needs no extra data — only a different fold over what is stored.
+    """
+    path = row["table"].split("#")[0]
+    if mode == "file":
+        return path.rsplit("/", 1)[-1]
+    if mode == "dir":
+        return path.rsplit("/", 1)[0] if "/" in path else "."
+    if mode == "table":
+        return row["table"]
+    return row.get(mode, "")
+
+
 def project(store: dict, terms, dep_var=None, table_filter=None,
             as_csv=False, show_all=False, as_summary=False,
-            as_compact=False) -> str:
+            as_compact=False, group_by=None, show_notes=False) -> str:
     tables = store["tables"]
     if table_filter:
         tables = [t for t in tables if any(f in t["table_id"] for f in table_filter)]
@@ -1124,10 +1143,47 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                              if t.get("est_full") and t["est_full"][i][col] is not None
                              else None),
                     "cmd": (t.get("log") or {}).get("cmd") or "",
+                    "notes": t.get("notes", ""),
+                    "flags": t.get("flags", []),
                 })
     if not rows:
         return "No coefficients matched. Try broader --terms, or run `extract` first."
 
+    if group_by:
+        # Comparing one term across files, directories or vintages was the one
+        # question this tool could not express, so it kept being answered with
+        # throwaway code -- which is where every analysis error came from.
+        if group_by not in GROUP_KEYS:
+            return (f"Unknown --group-by {group_by!r}. "
+                    f"Choose one of: {', '.join(GROUP_KEYS)}")
+        groups: dict[str, list] = {}
+        for r in rows:
+            groups.setdefault(group_key(r, group_by), []).append(r)
+        # Group labels share a long prefix when the store holds absolute
+        # paths; printing it once per group is pure waste.
+        keys = sorted(groups)
+        prefix = ""
+        if group_by in ("dir", "table", "file") and len(keys) > 1:
+            common = os.path.commonprefix(keys)
+            prefix = common[:common.rfind("/") + 1] if "/" in common else ""
+        out = [f"Grouped by {group_by}: {len(groups)} group(s), "
+               f"{len(rows)} coefficient(s)."
+               + (f"  (paths relative to {prefix})" if prefix else "") + "\n"]
+        for key in keys:
+            g = groups[key]
+            out.append(f"\n## {key[len(prefix):] or key}   "
+                       f"({len(g)} coefficient(s))\n")
+            out.append(project_rows(g, as_csv, show_all, as_summary,
+                                    as_compact, show_notes))
+        return "\n".join(out)
+
+    return project_rows(rows, as_csv, show_all, as_summary, as_compact,
+                        show_notes)
+
+
+def project_rows(rows: list[dict], as_csv=False, show_all=False,
+                 as_summary=False, as_compact=False, show_notes=False) -> str:
+    """Render one set of rows in the requested format."""
     if as_summary:
         return distribution(rows)
 
@@ -1178,6 +1234,25 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                 line += f" {r['full'] if r['full'] is not None else ''} | {r['cmd'][:60]} |"
             out.append(line)
         out.append("")
+    if show_notes:
+        # The store has always carried notes; nothing surfaced them, so
+        # "what do the table notes say" needed the source file.
+        seen: dict[str, list[str]] = {}
+        for r in rows:
+            if r["notes"] or r["flags"]:
+                seen.setdefault(r["notes"], []).append(
+                    r["table"].rsplit("/", 1)[-1])
+        if seen:
+            out.append("### Table notes\n")
+            for note, tabs in seen.items():
+                where = tabs[0] if len(tabs) == 1 else f"{len(tabs)} tables"
+                out.append(f"- **{where}** — {note or '(no note row)'}")
+            flagged = {t: f for r in rows if r["flags"]
+                       for t, f in [(r["table"].rsplit("/", 1)[-1],
+                                     "; ".join(r["flags"]))]}
+            for tab, fl in flagged.items():
+                out.append(f"- **{tab}** flags: {fl}")
+            out.append("")
     return "\n".join(out)
 
 
@@ -1430,13 +1505,70 @@ def run_terms(args) -> int:
     return 0
 
 
+DIALECT_PROBES = [
+    ("stars: \\sym{***}", re.compile(r"\\sym\s*\{\*+\}")),
+    ("stars: $^{***}$ / ^{***}", re.compile(r"\^\s*\{?\s*\*+")),
+    ("stars: \\textsuperscript{***}", re.compile(r"\\textsuperscript\s*\{\*+\}")),
+    ("stars: bare ***", re.compile(r"\d\s*\*{1,3}(?!\w)")),
+    ("stars: daggers", re.compile(r"\\(?:dagger|ddagger|textdagger)")),
+    ("stars: letter superscripts", re.compile(r"\^\s*\{?\s*[a-c]\}")),
+    ("uncertainty in ( )", re.compile(r"&\s*\(\s*-?\d")),
+    ("uncertainty in [ ]", re.compile(r"&\s*\[\s*-?\d")),
+    ("uncertainty in { }", re.compile(r"&\s*\{\s*-?\d")),
+    ("siunitx S columns", re.compile(r"\bS\[[^\]]*\]|\\num\s*\{")),
+    ("beamer overlays", OVERLAY_RE),
+    ("decimal comma", re.compile(r"&\s*-?0,\d")),
+]
+
+
+def run_dialects(args) -> int:
+    """Report which markup conventions a corpus actually uses.
+
+    The worst bug this parser shipped was silent: `$^{***}$` made a cell
+    non-numeric, so an entire coefficient row was dropped and its values
+    promoted into the header, at confidence 1.0. Nothing reported which
+    convention a corpus used, so an unsupported one could only be discovered
+    by its damage. This surfaces it first.
+    """
+    root = Path(args.project_root).resolve()
+    files, _ = discover(args.paths, root, args.exclude)
+    if not files:
+        print("dialects: no .tex files matched.")
+        return 1
+    hits: dict[str, list[str]] = {}
+    for f in files:
+        try:
+            text = f.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for name, pat in DIALECT_PROBES:
+            if pat.search(text):
+                hits.setdefault(name, []).append(relpath(f, root))
+    print(f"dialects: scanned {len(files)} file(s)\n")
+    print(f"{'convention':<34}{'files':>7}  example")
+    for name, fs in sorted(hits.items(), key=lambda kv: -len(kv[1])):
+        print(f"{name:<34}{len(fs):>7}  {fs[0].rsplit('/', 1)[-1][:40]}")
+    supported = {"stars: \\sym{***}", "stars: bare ***", "stars: $^{***}$ / ^{***}",
+                 "uncertainty in ( )", "uncertainty in [ ]", "beamer overlays",
+                 "decimal comma", "siunitx S columns"}
+    unknown = [n for n in hits if n not in supported]
+    print()
+    if unknown:
+        print("NOT covered by a golden fixture — verify before trusting output:")
+        for n in unknown:
+            print(f"  {n}  ({len(hits[n])} file(s), e.g. {hits[n][0]})")
+    else:
+        print("Every convention found is covered by a golden fixture.")
+    return 0
+
+
 def run_project(args) -> int:
     root = Path(args.project_root).resolve()
     store = load_store(root)
     terms = [t.strip() for t in args.terms.split(",")] if args.terms else []
     tabs = [t.strip() for t in args.tables.split(",")] if args.tables else []
     out = project(store, terms, args.dep_var, tabs, args.csv, args.all,
-                  args.summarize, args.compact)
+                  args.summarize, args.compact, args.group_by, args.notes)
 
     # A projection is only worth reading when it is SELECTIVE. An unfiltered
     # dump can exceed the source it was meant to compress, which defeats the
@@ -1446,9 +1578,15 @@ def run_project(args) -> int:
         print(f"Projection would be ~{len(out) // 4:,} tokens "
               f"(budget ~{PROJECTION_BUDGET // 4:,}). Refusing: at this size it "
               f"no longer compresses anything.\n")
-        print("Narrow it with --terms / --dep-var / --tables, or use "
-              "--compact for the same rows ~4x smaller, or "
-              "--distribution for a per-outcome count inventory.\n")
+        hint = ["Narrow it with --terms / --dep-var / --tables"]
+        if not args.compact and not args.summarize:
+            hint.append("use --compact for the same rows, much smaller")
+        if not args.summarize:
+            hint.append("use --distribution for a per-outcome count inventory")
+        if args.group_by:
+            hint.append("drop --group-by, or filter to fewer terms — grouping "
+                        "multiplies the output by the number of groups")
+        print(". ".join(hint) + ".\n")
         print("Most common terms:\n")
         print(f"{'coefs':>6}  {'tables':>6}  term")
         for term, n, ntab in idx[:15]:
@@ -1545,9 +1683,22 @@ def main(argv=None) -> int:
                    help="legend-encoded rows; same information, far smaller")
     p.add_argument("--distribution", dest="summarize", action="store_true",
                    help="inventory of counts per term and outcome (no averages)")
+    p.add_argument("--group-by", dest="group_by", default=None,
+                   choices=GROUP_KEYS,
+                   help="split results into blocks by file, dir, table, term "
+                        "or dep_var")
+    p.add_argument("--notes", dest="notes", action="store_true",
+                   help="append each table's note row and flags")
     p.add_argument("--force-full", action="store_true",
                    help="emit an over-budget projection anyway")
     common(p)
+
+    d = sub.add_parser("dialects",
+                       help="report which markup conventions a corpus uses")
+    d.add_argument("paths", nargs="+", help="directory, glob, or manuscript")
+    d.add_argument("--exclude", default=None,
+                   help="regex of paths to skip (opt-in)")
+    common(d)
 
     tm = sub.add_parser("terms", help="list distinct terms to filter on")
     tm.add_argument("--top", type=int, default=40)
@@ -1569,6 +1720,8 @@ def main(argv=None) -> int:
         return run_project(args)
     if args.cmd == "stats":
         return run_stats(args)
+    if args.cmd == "dialects":
+        return run_dialects(args)
     if args.cmd == "terms":
         return run_terms(args)
     if args.cmd == "verify":
