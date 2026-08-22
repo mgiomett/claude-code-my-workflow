@@ -261,29 +261,44 @@ class TestDistribution(unittest.TestCase):
         self.assertLess(len(summary) * 5, len(rows))
 
 
+class TestBudgetCalibration(unittest.TestCase):
+    """A byte budget divided by 4 admitted 1.6-2.4x more context than
+    intended, worst for --compact, the mode the docs recommend."""
+
+    def test_estimate_is_mode_aware(self):
+        text = "x" * 10_000
+        self.assertGreater(pt.estimate_tokens(text, "compact"),
+                           pt.estimate_tokens(text, "markdown"))
+        self.assertGreater(pt.estimate_tokens(text, "markdown"),
+                           pt.estimate_tokens(text, "csv"))
+
+    def test_compact_is_not_assumed_four_chars_per_token(self):
+        self.assertGreater(pt.estimate_tokens("y" * 4000, "compact"), 1500)
+
+
 class TestProjectionBudget(TempProject):
     """An unfiltered projection can exceed the source it was meant to
     compress; the tool must refuse rather than flood the context."""
 
     def test_over_budget_projection_is_refused(self):
         self.extract()
-        original = pt.PROJECTION_BUDGET
+        original = pt.PROJECTION_BUDGET_TOKENS
         try:
-            pt.PROJECTION_BUDGET = 200
+            pt.PROJECTION_BUDGET_TOKENS = 80
             out = run_cli("project", "--project-root", str(self.root))
         finally:
-            pt.PROJECTION_BUDGET = original
+            pt.PROJECTION_BUDGET_TOKENS = original
         self.assertIn("Refusing", out)
         self.assertIn("--terms", out)
 
     def test_force_full_overrides(self):
         self.extract()
-        original = pt.PROJECTION_BUDGET
+        original = pt.PROJECTION_BUDGET_TOKENS
         try:
-            pt.PROJECTION_BUDGET = 200
+            pt.PROJECTION_BUDGET_TOKENS = 80
             out = run_cli("project", "--force-full", "--project-root", str(self.root))
         finally:
-            pt.PROJECTION_BUDGET = original
+            pt.PROJECTION_BUDGET_TOKENS = original
         self.assertNotIn("Refusing", out)
 
 
@@ -466,9 +481,28 @@ class TestGroupBy(unittest.TestCase):
         self.assertIn("## v1", out)
         self.assertIn("## v2", out)
 
-    def test_group_by_file_splits_schemes(self):
+    def test_group_by_file_keeps_distinct_files_apart(self):
+        """Three distinct files are three groups. The earlier version of this
+        test asserted TWO -- keying on the basename merged v1/a.tex with
+        v2/a.tex, so the test encoded the bug as correct behaviour."""
         out = pt.project(self._store(), ["treat"], group_by="file")
-        self.assertIn("Grouped by file: 2 group(s)", out)
+        self.assertIn("Grouped by file: 3 group(s)", out)
+
+    def test_same_basename_in_two_directories_never_merges(self):
+        store = self._store()
+        store["tables"][1]["table_id"] = "v3/a.tex#t0"   # a.tex in v1, v2, v3
+        out = pt.project(store, ["treat"], group_by="file")
+        self.assertIn("3 group(s)", out)
+        for est in ("0.5", "0.6", "0.7"):
+            self.assertIn(est, out)
+
+    def test_compact_legend_disambiguates_collided_basenames(self):
+        store = self._store()
+        store["tables"][1]["table_id"] = "v2/a.tex#t0"
+        out = pt.project(store, ["treat"], as_compact=True)
+        legend = next(l for l in out.splitlines() if l.startswith("tables:"))
+        names = [p.split("=", 1)[1] for p in legend.split()[1:]]
+        self.assertEqual(len(names), len(set(names)), f"ambiguous legend: {names}")
 
     def test_grouping_never_loses_or_duplicates_a_coefficient(self):
         store = self._store()

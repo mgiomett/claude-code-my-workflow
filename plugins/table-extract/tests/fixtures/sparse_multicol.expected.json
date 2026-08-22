@@ -1,10 +1,62 @@
 {
-  "spec_labels": ["(1)", "(2)", "(3)", "(4)"],
-  "dep_vars": ["shock", "shock", "rate", "rate"],
-  "terms": ["instrument", "fitted"],
-  "est": [[0.81, 0.79, null, null], [null, null, -1.017, -0.802]],
-  "unc": [[0.11, 0.12, null, null], [null, null, 0.544, 0.418]],
-  "stars": [[3, 3, 0, 0], [0, 0, 1, 1]],
+  "spec_labels": [
+    "(1)",
+    "(2)",
+    "(3)",
+    "(4)"
+  ],
+  "dep_vars": [
+    "First stage shock",
+    "First stage shock",
+    "Second stage rate",
+    "Second stage rate"
+  ],
+  "terms": [
+    "instrument",
+    "fitted"
+  ],
+  "est": [
+    [
+      0.81,
+      0.79,
+      null,
+      null
+    ],
+    [
+      null,
+      null,
+      -1.017,
+      -0.802
+    ]
+  ],
+  "unc": [
+    [
+      0.11,
+      0.12,
+      null,
+      null
+    ],
+    [
+      null,
+      null,
+      0.544,
+      0.418
+    ]
+  ],
+  "stars": [
+    [
+      3,
+      3,
+      0,
+      0
+    ],
+    [
+      0,
+      0,
+      1,
+      1
+    ]
+  ],
   "uncertainty_type": "se",
   "n_cols": 4,
   "confidence": 1.0
