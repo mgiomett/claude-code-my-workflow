@@ -40,6 +40,10 @@ SPEC_ROW = re.compile(r"^\s*(\(\s*\d+\s*\)\s*){2,}\s*$")
 NUM = re.compile(r"^[-+(\[]?\s*\d[\d,]*\.?\d*(?:[eE][-+]?\d+)?\s*[)\]]?\*{0,5}$")
 STARS = re.compile(r"\*{1,5}$")
 UNC_WRAPPED = re.compile(r"^\s*[\(\[].*[\)\]]\s*$")
+UNC_LABEL = re.compile(
+    r"^\s*\(?\s*(robust|clustered|driscoll[- ]?kraay|newey[- ]?west|bootstrap\w*)?"
+    r"\s*\(?\s*(s\.?\s?e\.?s?|std\.?\s*(err|error|dev)\w*|standard\s+errors?"
+    r"|t[-\s]?stats?\.?|z[-\s]?stats?\.?|p[-\s]?values?)\.?\s*\)?\.?\s*$", re.I)
 
 UNC_PATTERNS = [
     ("se", re.compile(r"standard error|std\.? ?err", re.I)),
@@ -92,6 +96,7 @@ def split_by_columns(line: str, spans: list[tuple[int, int]]) -> list[str]:
     PDF confidence is capped below 1.0.
     """
     cells = [""] * len(spans)
+    counts = [0] * len(spans)
     centres = [(a + b) / 2 for a, b in spans]
     left = stub_boundary(spans)
     for m in re.finditer(r"\S+", line):
@@ -100,7 +105,14 @@ def split_by_columns(line: str, spans: list[tuple[int, int]]) -> list[str]:
             continue
         i = min(range(len(centres)), key=lambda k: abs(centres[k] - mid))
         cells[i] = (cells[i] + " " + m.group(0)).strip()
-    return cells
+        if re.search(r"\d", m.group(0)):
+            counts[i] += 1
+    # C1: two numeric tokens in one column means the geometry inferred from the
+    # header does not fit this row -- typically a page break where the layout
+    # changed. Silently, this destroyed values AND shifted the survivors onto
+    # the wrong specification, with est and unc misaligned differently from
+    # each other. Report it; the caller refuses.
+    return cells, any(c > 1 for c in counts)
 
 
 def stub_of(line: str, spans: list[tuple[int, int]]) -> str:
@@ -153,6 +165,7 @@ def parse_tables(text: str, src: str) -> tuple[list[dict], list[dict]]:
         # Header block: text rows between the spec row and the first data row.
         header: list[list[str]] = []
         terms, est, unc, stars = [], [], [], []
+        geometry_broken = False
         notes_parts, pending = [], None
         i = si + 1
         blanks = 0
@@ -163,10 +176,13 @@ def parse_tables(text: str, src: str) -> tuple[list[dict], list[dict]]:
                 blanks += 1
                 continue
             blanks = 0
-            if SPEC_ROW.match(line):
+            if SPEC_ROW.match(line) or "\x0c" in line:
                 break
             stub = stub_of(line, spans)
-            cells = [parse_value(c) for c in split_by_columns(line, spans)]
+            raw_cells, merged = split_by_columns(line, spans)
+            if merged:
+                geometry_broken = True
+            cells = [parse_value(c) for c in raw_cells]
             filled = [c for c in cells if c["value"] is not None or c.get("text")]
             nums = [c for c in filled if c["value"] is not None]
             if not filled:
@@ -174,9 +190,27 @@ def parse_tables(text: str, src: str) -> tuple[list[dict], list[dict]]:
                     notes_parts.append(stub)
                 continue
             wrapped = [c for c in nums if c["wrapped"]]
-            if not stub and nums and len(wrapped) == len(nums):
+            if nums and len(wrapped) == len(nums) and (
+                    not stub or (pending is not None and UNC_LABEL.match(stub))):
+                # C6: a LABELLED uncertainty row ("Robust s.e.") was being
+                # reclassified as a note, losing every standard error.
                 if pending is not None:
-                    unc[pending] = [c["value"] for c in cells]
+                    if any(v is not None for v in unc[pending]):
+                        geometry_broken = True   # C3: a second uncertainty row
+                    else:
+                        unc[pending] = [c["value"] for c in cells]
+                    pending = None               # C3: consume it exactly once
+                continue
+            # C2: a stub-less row holding exactly one bare integer and no
+            # stars is a page number, not an estimate.
+            if (not stub and len(nums) == 1 and not wrapped
+                    and not any(c["stars"] for c in cells)
+                    and float(nums[0]["value"]).is_integer()):
+                continue
+            # C5: a stub-less row whose numbers are MOSTLY wrapped is a
+            # malformed uncertainty row, not a coefficient row.
+            if not stub and wrapped and len(wrapped) < len(nums):
+                geometry_broken = True
                 continue
             if nums and len(wrapped) < len(nums):
                 if is_stat_label(stub.lower().rstrip(":").strip()):
@@ -195,11 +229,27 @@ def parse_tables(text: str, src: str) -> tuple[list[dict], list[dict]]:
             # Without this it matched no branch and was silently dropped.
             notes_parts.append(" ".join(line.split()))
         # Published tables put the note above as often as below, so scan both.
-        head = " ".join(l.strip() for l in lines[max(0, si - 8):si])
+        # C4: an unbounded upward scan inherited the PREVIOUS table's note,
+        # and a wrong inherited type scored higher than an honest "unknown".
+        lo = max(0, si - 8)
+        for j in range(si - 1, lo - 1, -1):
+            if SPEC_ROW.match(lines[j]) or "\x0c" in lines[j]:
+                lo = j + 1
+                break
+        head = " ".join(l.strip() for l in lines[lo:si])
         tail = " ".join(l.strip() for l in lines[i:i + 6])
         notes = " ".join(notes_parts + [head, tail])
+        if geometry_broken:
+            residue.append({
+                "table_id": f"{src}#p{si + 1}", "src": src, "line": si + 1,
+                "reason": "column geometry does not fit every row (two numeric "
+                          "tokens landed in one column) — values would be lost "
+                          "and survivors misattributed",
+                "raw": lines[si][:200]})
+            continue
         if not terms:
-            residue.append({"src": src, "line": si + 1,
+            residue.append({"table_id": f"{src}#p{si + 1}", "src": src,
+                            "line": si + 1,
                             "reason": "no coefficient rows under the column header",
                             "raw": lines[si][:200]})
             continue

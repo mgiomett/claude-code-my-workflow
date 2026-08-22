@@ -79,10 +79,56 @@ def path_to_pattern(raw: str) -> tuple[re.Pattern | None, int]:
         pos = m.end()
     out.append(re.escape(base[pos:]))
     body = "".join(out)
-    # Refuse a pattern with no literal anchor at all — it would match everything.
-    if not re.search(r"[A-Za-z0-9_]", MACRO.sub("", base)):
+    # M8: adjacent wildcards with nothing between them cause catastrophic
+    # backtracking (9s per filename at eight holes). They are also redundant.
+    body = re.sub(r"(?:\(\[\^\\\\/\]\*\?\)){2,}", r"([^\\/]*?)", body)
+    # C7: the extension is not a literal anchor. "$OUT/`f'.tex" would otherwise
+    # match every .tex file and be reported as a confident unique match.
+    stem = re.sub(r"\.[A-Za-z0-9]{1,5}$", "", MACRO.sub("", base))
+    if not re.search(r"[A-Za-z0-9_]", stem):
         return None, holes
     return re.compile(r"^" + body + r"$"), holes
+
+
+BLOCK_COMMENT = re.compile(r"/\*.*?\*/", re.S)
+LINE_COMMENT = re.compile(r"(^|\s)(//+|\*|#).*$", re.M)
+CONTINUATION = re.compile(r"\s*///.*?\n\s*")
+
+
+def preprocess(text: str, suffix: str) -> list[tuple[int, str]]:
+    """Return [(original_line_no, logical_line)].
+
+    C9: matching line-at-a-time scanned `/* */` dead code while missing every
+    `///`-continued live writer -- a complete inversion on realistic Stata.
+    M6: comment stripping also stops commented-out R from registering.
+    """
+    # Blank out block comments, preserving line count so numbers stay right.
+    text = BLOCK_COMMENT.sub(lambda m: re.sub(r"[^\n]", " ", m.group(0)), text)
+    lines = text.split("\n")
+    out: list[tuple[int, str]] = []
+    buf, start = "", None
+    delim_semi = False
+    for i, raw in enumerate(lines, 1):
+        line = LINE_COMMENT.sub("", raw) if suffix in {".R", ".r", ".py"} else raw
+        if re.match(r"\s*#delimit\s*;", line):
+            delim_semi = True
+            continue
+        if re.match(r"\s*#delimit\s*cr", line):
+            delim_semi = False
+            continue
+        if start is None:
+            start = i
+        buf += " " + line.strip()
+        if line.rstrip().endswith("///"):
+            buf = buf.rstrip()[:-3]
+            continue
+        if delim_semi and ";" not in line:
+            continue
+        out.append((start, buf.strip().rstrip(";")))
+        buf, start = "", None
+    if buf.strip():
+        out.append((start or 1, buf.strip()))
+    return out
 
 
 def scan_code(paths: list[Path]) -> list[dict]:
@@ -93,28 +139,46 @@ def scan_code(paths: list[Path]) -> list[dict]:
             files.extend(sorted(f for f in p.rglob("*") if f.suffix in CODE_SUFFIXES))
         elif p.is_file():
             files.append(p)
-    writers = []
+    writers, refused = [], []
     for f in files:
         try:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for lineno, line in enumerate(text.splitlines(), 1):
+        for lineno, line in preprocess(text, f.suffix):
             kind = next((k for k, pat in WRITERS if pat.search(line)), None)
             if not kind:
                 continue
-            cands = QUOTED.findall(line)
-            if not cands:
-                cands = AFTER_USING.findall(line)
+            # M7: only the token after `using` is an output path. Every quoted
+            # string on the line is not -- title("... .tex") and the payload of
+            # `file write` were both being taken as paths.
+            m_using = re.search(r'\busing\s+"([^"]+)"', line, re.I)
+            if m_using:
+                cands = [m_using.group(1)]
+            elif re.search(r"\bfile\s+(?:open|write)\b", line, re.I):
+                cands = []
+            else:
+                cands = QUOTED.findall(line)[:1] or AFTER_USING.findall(line)[:1]
             for raw in cands:
                 pattern, holes = path_to_pattern(raw)
                 if pattern is None:
+                    refused.append({"file": str(f), "line": lineno,
+                                    "raw_path": raw, "command": kind})
                     continue
                 writers.append({
                     "file": str(f), "line": lineno, "command": kind,
                     "raw_path": raw, "pattern": pattern, "macro_holes": holes,
                     "source_line": " ".join(line.split())[:200],
+                    "dir": re.split(r"[\\/]", raw.strip())[:-1],
                 })
+    if refused:
+        # M9: a recognised writer whose path could not be turned into a usable
+        # pattern used to vanish with no accounting.
+        print(f"locate: {len(refused)} writer line(s) had an unusable output "
+              f"path (too little literal text to match on):", file=sys.stderr)
+        for r in refused[:5]:
+            print(f"    {Path(r['file']).name}:{r['line']}  {r['raw_path']}",
+                  file=sys.stderr)
     return writers
 
 
@@ -140,11 +204,22 @@ def match(writers: list[dict], tables: list[Path]) -> dict:
         scored = []
         for w in writers:
             m = w["pattern"].match(t.name)
-            if m:
-                scored.append((sum(len(g or "") for g in m.groups()), w))
+            if not m:
+                continue
+            # C8: a fully literal directory is a checkable, falsifiable
+            # constraint -- unlike a macro one. If it cannot be a suffix of
+            # where the file actually sits, this writer did not produce it.
+            lit = [d for d in w["dir"] if d not in ("", ".", "..")]
+            if lit and not any(MACRO.search(d) for d in lit):
+                parts = list(t.resolve().parts)[:-1]
+                if lit != parts[-len(lit):]:
+                    continue
+            scored.append((sum(len(g or "") for g in m.groups()), w))
         if scored:
             best = min(s for s, _ in scored)
-            found = [w for s, w in scored if s == best]
+            # C10: a near-tie is ambiguity, not a winner. Collapsing it hid the
+            # true producer behind an unrelated writer with more literal text.
+            found = [w for s, w in scored if s - best <= 2]
         else:
             found = []
         hits[str(t)] = found
