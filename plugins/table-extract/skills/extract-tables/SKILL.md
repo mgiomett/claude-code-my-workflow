@@ -12,7 +12,14 @@ crowds out the context needed to reason across them. This skill parses them
 once with a deterministic script and hands you a small, filtered view.
 
 **The discipline this skill exists to enforce: extract, then project. Do not
-read the source tables, and do not read the store.** Reading either defeats
+read the source tables, and do not read the store.**
+
+Expect roughly **4.7x** fewer tokens on a selective query over a large corpus,
+or **~10x** with the compact row format (a legend for tables and outcomes
+instead of repeating them on every row — same information, no loss).
+Much larger ratios are available only by answering a narrower question than the
+one asked — an independent audit found every inflated figure in this project's
+history came from exactly that substitution. Reading either defeats
 the purpose — the store is machine-backing data, often larger than the source
 it came from.
 
@@ -24,8 +31,10 @@ it came from.
 
 ## When NOT to use
 
-- One or two tables — just read them. There is a fixed ~1k-token overhead per
-  session, so below roughly three tables this costs more than it saves.
+- One or two tables — just read them. The fixed overhead is ~2,600-3,000 tokens
+  per session (this file is ~1,600 of it), so below roughly three tables this
+  costs more than it saves. For "what is in this table" questions the crossover
+  is nearer fifteen tables, because the whole table has to be projected.
 - Anything the projection does not carry: table notes, footnote text, exact
   formatting, column ordering. Open the file for those.
 - Verifying numbers against a manuscript. That is a different job with a
@@ -116,6 +125,11 @@ split with a warning and must not be merged.
 
 **Trust the confidence column.** Anything below 1.0 carries a flag explaining
 why. Any source other than the LaTeX itself is shown explicitly.
+
+**Watch for the stacked-panel flag.** When one table stacks Panel A over
+Panel B, the summary rows repeat and cannot be attributed to a panel, so they
+are dropped and the table is flagged. The coefficients remain, each tagged with
+its panel.
 
 **Read the residue.** Tables the parser could not trust are recorded with a
 reason, never silently dropped. A residue entry is a table you still need to

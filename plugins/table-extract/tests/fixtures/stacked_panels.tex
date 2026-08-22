@@ -1,0 +1,20 @@
+% C5 regression: two panels in one tabular. Summary rows repeat, so their
+% panel attribution is ambiguous and they must be dropped, not guessed --
+% while the coefficients themselves stay.
+\begin{tabular}{lcc}
+\toprule
+ & (1) & (2) \\
+ & wage & wage \\
+\midrule
+\multicolumn{3}{l}{\textit{Panel A: Men}} \\
+treat & 0.500 & 0.600 \\
+      & (0.100) & (0.120) \\
+Observations & 500 & 500 \\
+\midrule
+\multicolumn{3}{l}{\textit{Panel B: Women}} \\
+treat & -0.900 & -0.850 \\
+      & (0.200) & (0.210) \\
+Observations & 480 & 480 \\
+\bottomrule
+\multicolumn{3}{l}{\footnotesize Standard errors in parentheses} \\
+\end{tabular}

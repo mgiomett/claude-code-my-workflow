@@ -1,0 +1,11 @@
+% M4 regression: overlay values are slide-dependent, so extracting one of them
+% would be a quiet error. Documented as refused; must actually be refused.
+\begin{tabular}{lcc}
+\toprule
+ & (1) & (2) \\
+ & y & y \\
+\midrule
+post & \onslide<2->{0.100} & \onslide<2->{0.200} \\
+     & \onslide<2->{(0.030)} & \onslide<2->{(0.040)} \\
+\bottomrule
+\end{tabular}

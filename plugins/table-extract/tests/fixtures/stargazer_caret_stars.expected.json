@@ -1,0 +1,11 @@
+{
+  "spec_labels": ["(3)", "(4)"],
+  "terms": ["treat", "post"],
+  "est": [[0.342, 0.298], [-0.045, -0.051]],
+  "unc": [[0.091, 0.088], [0.033, 0.029]],
+  "stars": [[3, 3], [0, 0]],
+  "stats": {"Observations": [2847.0, 2847.0]},
+  "uncertainty_type": "se",
+  "confidence": 1.0,
+  "flags": []
+}
