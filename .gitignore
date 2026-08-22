@@ -9,6 +9,9 @@
 *.fdb_latexmk
 *.fls
 *.log
+# ...but test fixtures are source, not build output. Without this the
+# log-enrichment tests fail on a fresh clone with a missing fixture.
+!plugins/*/tests/log_fixtures/*.log
 *.nav
 *.out
 *.snm

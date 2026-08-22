@@ -1,0 +1,13 @@
+{
+  "terms": ["Specialization", "Constant"],
+  "est": [[-0.003, -0.002], [0.069, 0.071]],
+  "unc": [[0.002, 0.002], [0.032, 0.034]],
+  "stars": [[2, 0], [2, 2]],
+  "fe": {"Fixed Effects": [1, 1]},
+  "annotations": {"Controls": ["Loan", "Loan"]},
+  "stats": {"Mean of dependent variable": [0.05, 0.05],
+            "R^2": [0.046, 0.047],
+            "N": [9450.0, 9450.0]},
+  "uncertainty_type": "se",
+  "confidence": 1.0
+}

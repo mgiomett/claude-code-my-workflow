@@ -1,0 +1,22 @@
+% Dialect A: \sym{} stars, parenthesised SEs, SE stated in notes.
+{
+\def\sym#1{\ifmmode^{#1}\else\(^{#1}\)\fi}
+\begin{tabular}{l*{3}{c}}
+\toprule
+                    &\multicolumn{1}{c}{(1)}&\multicolumn{1}{c}{(2)}&\multicolumn{1}{c}{(3)}\\
+                    &\multicolumn{1}{c}{log\_wage}&\multicolumn{1}{c}{log\_wage}&\multicolumn{1}{c}{emp}\\
+\midrule
+treat               &      0.3420\sym{***}&      0.2980\sym{***}&      0.1150\sym{**} \\
+                    &    (0.0910)         &    (0.0880)         &    (0.0520)         \\
+\addlinespace
+post                &     -0.0450         &     -0.0510\sym{*}  &                     \\
+                    &    (0.0330)         &    (0.0290)         &                     \\
+\midrule
+Firm FE             &         Yes         &         Yes         &         Yes         \\
+Year FE             &          No         &         Yes         &         Yes         \\
+Observations        &       2,847         &       2,847         &       2,801         \\
+R-squared           &      0.4130         &      0.4520         &      0.3910         \\
+\bottomrule
+\multicolumn{4}{l}{\footnotesize Standard errors in parentheses}\\
+\end{tabular}
+}

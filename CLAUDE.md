@@ -67,7 +67,7 @@ python scripts/quality_score.py Quarto/file.qmd
 
 # One-time setup
 ./scripts/install-hooks.sh          # per-clone: pre-commit gates
-./scripts/link-plugin.sh            # per-machine: research-guardrails in every project
+./scripts/link-plugin.sh            # per-machine: plugins/ (guardrails + skills) in every project
 ```
 
 **Cross-project guardrails.** Four layers with different authority. Rules resolve
@@ -93,6 +93,12 @@ requires it — and never a *broader* allow, since the global blanket already co
 Two failure modes to avoid: copying a hook into a project's `.claude/hooks/` (that is how the
 copies drift — edit the plugin, then `/reload-plugins`), and denying in a hook something you
 also want to prompt on (the hook deny wins, and the ask rule silently never fires).
+
+`plugins/` carries more than hooks: a plugin directory may also ship `skills/`,
+which reach every project the same way. [`plugins/table-extract/`](plugins/table-extract/)
+is the first — a deterministic LaTeX regression-table extractor (`/extract-tables`).
+Plugin-hosted skills are covered by `check-skill-integrity.py` but deliberately
+excluded from the surface-sync counts, so adding one churns no README numbers.
 
 **Palette contract:** color names in `Preambles/header.tex` must match SCSS variables in `Quarto/theme-template.scss`. See [`Preambles/README.md`](Preambles/README.md).
 
