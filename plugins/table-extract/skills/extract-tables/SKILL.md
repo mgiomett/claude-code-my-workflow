@@ -1,6 +1,6 @@
 ---
 name: extract-tables
-description: Extract regression tables from LaTeX source (and paired Stata logs) into a compact coefficient store, then read a small filtered projection instead of the raw tables. Use when synthesizing results across many tables — "compare the coefficient on X across all my tables", "pull the estimates out of these tex files", "what does treat do across specifications", "summarize my results tables" — or whenever a task would otherwise mean opening dozens of table files. Deterministic parser, no model in the extraction path.
+description: Extract regression tables from LaTeX source (and paired Stata logs) into a compact coefficient store, then read a small filtered projection instead of the raw tables. USE THIS BEFORE READING ANY .tex TABLE FILE when the task involves more than about five tables, however they are distributed — many files, or a few files each holding many tables (one .tex often contains dozens of tabulars). Triggers: "summarize/synthesize findings across these tables", "read these 50 tex files", "compare the coefficient on X across all my tables", "what does treat do across specifications", "which results are robust", "significance rates across schemes", "how did these estimates change between versions". Also for provenance (which script wrote this table) and tables in PDFs. Deterministic parser, no model in the extraction path, so extraction itself costs no tokens.
 argument-hint: "[directory, glob, or manuscript] [focal term]"
 allowed-tools: ["Bash", "Read", "Glob"]
 ---
@@ -26,8 +26,13 @@ it came from.
 
 ## When to use
 
+**Reach for this before opening any `.tex` table file, not after.** The saving
+is in not reading them; once a few are in context the cost is already paid.
+
 - Comparing one coefficient across many specifications, outcomes, or samples.
-- Any question that would otherwise mean opening more than a handful of tables.
+- Any question that would otherwise mean opening more than about five tables —
+  counting *tables*, not files. A single `.tex` written by `esttab` commonly
+  holds twenty or more, so "just 44 files" can be 1,162 tables.
 - Recovering full precision or the literal estimation command from analysis logs.
 
 ## When NOT to use
