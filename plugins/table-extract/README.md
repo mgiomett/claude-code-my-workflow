@@ -37,6 +37,7 @@ raw span. The counts must balance, and extraction aborts if they do not.
 | `terms` | List distinct terms with counts — run before projecting |
 | `project` | Emit a compact, filtered pivot for reading |
 | `verify` | Independent source round-trip check for misalignment |
+| `dialects PATH...` | Report which markup conventions a corpus uses |
 | `stats` | Store summary |
 | `--self-test` | Golden fixtures |
 
@@ -55,6 +56,8 @@ raw span. The counts must balance, and extraction aborts if they do not.
 | `--tables` | project | Comma-separated table-id filters |
 | `--distribution` | project | Per-term, per-outcome count inventory (no averages) |
 | `--compact` | project | Legend-encoded rows: same information, 2.5x smaller |
+| `--group-by` | project | Split into blocks by file, dir, table, term or dep_var |
+| `--notes` | project | Append each table's note row and flags |
 | `--csv` | project | Tidy long CSV instead of markdown |
 | `--all` | project | Always show source and confidence columns |
 | `--force-full` | project | Emit an over-budget projection anyway |
@@ -187,6 +190,18 @@ A baseline larger than a context window (the 43-scheme case, 1.29M tokens) is
 not a saving so much as a difference in feasibility — nothing could have paid
 that cost, so the comparison is not to a real alternative.
 
+## Check the dialect before trusting a new corpus
+
+```bash
+python3 .../parse_tables.py dialects path/to/tables
+```
+
+Reports which star and delimiter conventions appear, and names any that no
+golden fixture covers. The worst bug this parser shipped was silent precisely
+because nothing reported this: `$^{***}$` made a cell non-numeric, so a whole
+coefficient row was dropped and its values promoted into the header, at
+confidence 1.0. Run this first on a corpus the tool has not seen.
+
 ## Known limits
 
 - **Stacked panels** (two panels in one `tabular`) keep their coefficients and
@@ -198,11 +213,10 @@ that cost, so the comparison is not to a real alternative.
   row-level loss is visible rather than only reflected in a confidence penalty.
 - **Decimal commas** are distinguished from thousands separators by the leading
   group; `0,342` is 0.342, not 342.
-- **No grouping by file, scheme, or version.** `project` filters by term,
-  dependent variable and table id, but cannot break results out per source
-  file. A per-scheme or per-vintage comparison needs one call per group, or
-  code written against the store — which is where several past errors came
-  from.
+- **Grouping multiplies output.** `--group-by` answers per-file, per-vintage
+  and per-scheme questions in one call, but the result scales with the number
+  of groups, so the projection budget refuses a broad term filter combined
+  with many groups. Narrow the terms first.
 
 ## What this is not
 
