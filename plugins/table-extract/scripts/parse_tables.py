@@ -58,7 +58,7 @@ LEADING_OPT_RE = re.compile(
 # C2: an unescaped % comments out the rest of the line. Without this, a
 # commented-out row is parsed as a live estimate and a comment without a
 # trailing \\ swallows the label of the row beneath it.
-COMMENT_RE = re.compile(r"(?<!\\)%.*?$", re.M)
+COMMENT_RE = re.compile(r"(?:(?<=\\\\)|(?<!\\))%.*?$", re.M)
 SYM_RE = re.compile(r"\\sym\s*\{(\*+)\}")
 OVERLAY_RE = re.compile(
     r"\\(?:onslide|uncover|visible|invisible|alt|only|pause)\b|<\d+[->]")
@@ -216,11 +216,38 @@ def clean_text(s: str) -> str:
     return re.sub(r"\s+", " ", s).strip()
 
 
-def parse_cell_value(raw: str) -> dict:
+# Decimal evidence is either a group that is not three digits, or a leading
+# zero — no thousands group is written "0,342".
+DECIMAL_COMMA_RE = re.compile(
+    r"[\s&(\[]-?\d*,\d{1,2}(?!\d)"
+    r"|[\s&(\[]-?0,\d+"
+    r"|[\s&(\[]-?\d+,\d{4,}")
+THOUSANDS_COMMA_RE = re.compile(r"[\s&(\[]-?[1-9]\d{0,2},\d{3}(?!\d)")
+
+
+def comma_convention(text: str) -> str:
+    """Decide once per document what a comma means.
+
+    Deciding per cell was a 1000x-wrong-value bug: in `& 1,234 & 0,342 &` the
+    same coefficient came out as 1234.0 and 0.342. A document uses one
+    convention, so the evidence must be pooled. When both shapes genuinely
+    appear the file is ambiguous and its tables are refused, not guessed at.
+    """
+    dec = bool(DECIMAL_COMMA_RE.search(text))
+    tho = bool(THOUSANDS_COMMA_RE.search(text))
+    if dec and tho:
+        return "ambiguous"
+    if dec:
+        return "decimal"
+    return "thousands"          # the safe default: no decimal evidence seen
+
+
+def parse_cell_value(raw: str, comma: str = "thousands") -> dict:
     """Parse one data cell into value / stars / delimiter.
 
     `delim` records whether the number was wrapped — an uncertainty row's
-    signature. `text` is set when the cell is non-numeric.
+    signature. `text` is set when the cell is non-numeric. `comma` is the
+    document-level convention from `comma_convention`.
     """
     stars = 0
     m = SYM_RE.search(raw)
@@ -244,11 +271,7 @@ def parse_cell_value(raw: str) -> dict:
         if s.startswith(open_c) and s.endswith(close_c) and len(s) > 1:
             delim, s = open_c, s[1:-1].strip()
             break
-    # M14: only a comma separating groups of exactly three digits is a
-    # thousands separator. "0,342" is a decimal comma and must NOT become 342.
-    # A thousands group never begins with a zero, so "0,342" is a decimal
-    # comma (342.0 would be 1000x wrong) while "41,022" is a separator.
-    if re.match(r"^-?0,", s.strip()):
+    if comma == "decimal":
         s = s.replace(",", ".")
     else:
         s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s)
@@ -324,17 +347,23 @@ def detect_uncertainty_type(notes: list[str]) -> str:
     return min(hits, key=lambda h: order.index(h[0]))[0]
 
 
-def _expand_row(cells: list[str]) -> list[str]:
-    """Flatten \\multicolumn spans into one entry per physical column."""
+def _expand_row(cells: list[str], header: bool = False) -> list[str]:
+    """Flatten \\multicolumn spans into one entry per physical column.
+
+    A-C4: in a HEADER row the span label applies to every column it covers,
+    so padding with blanks discarded the outcome identity of all but the
+    first — and `--distribution`, whose premise is that grouping by outcome is
+    mandatory, then pooled incommensurable columns under "(unlabelled)".
+    """
     out = []
     for cell in cells:
         span, inner = strip_multicolumn(cell)
         out.append(inner)
-        out.extend([""] * (span - 1))
+        out.extend([inner if header else ""] * (span - 1))
     return out
 
 
-def parse_tabular(body: str, ncols_spec: int) -> dict:
+def parse_tabular(body: str, ncols_spec: int, comma: str = "thousands") -> dict:
     """Parse one tabular body. Raises Residue when it cannot be trusted."""
     spec_labels: list[str] | None = None
     header_rows: list[list[str]] = []
@@ -350,13 +379,14 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
     unclassified = 0
     stats_ambiguous = False
     unparsed_rows: list[str] = []
+    accounted = 0
     coef_widths: set[int] = set()
     seen_delims: set[str] = set()
     row_panel: list[str] = []
     current_panel = ""
     pending: int | None = None
 
-    raw_rows = split_rows(COMMENT_RE.sub("", body))
+    raw_rows = split_rows(body)
     parsed_rows = []
     for raw in raw_rows:
         # M12: rules first — \midrule[\heavyrulewidth] leaves an optional
@@ -377,7 +407,8 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
             else:
                 (notes if span > 1 else panels).append(text)
             continue
-        parsed_rows.append((_expand_row(cells), current_panel))
+        parsed_rows.append((_expand_row(cells), current_panel,
+                            _expand_row(cells, header=True)))
 
     if OVERLAY_RE.search(body):
         # M4: a beamer overlay table can show different values on different
@@ -389,16 +420,16 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         raise Residue("no data rows in tabular")
 
     # Column width is set by the widest row; a row wider than that is malformed.
-    ncols = max(len(r) for r, _ in parsed_rows) - 1
+    ncols = max(len(r) for r, _, _ in parsed_rows) - 1
     if ncols < 1:
         raise Residue("no data columns")
 
-    for flat, row_panel_label in parsed_rows:
+    for flat, row_panel_label, flat_hdr in parsed_rows:
         label = clean_text(flat[0])
         values = flat[1:]
         raw_width = len(values)
         values = values + [""] * (ncols - len(values))
-        cells = [parse_cell_value(v) for v in values]
+        cells = [parse_cell_value(v, comma) for v in values]
         filled = [c for c in cells if c["value"] is not None or c.get("text")]
         norm = label.lower().rstrip(":").strip()
 
@@ -407,6 +438,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         if (not terms and filled
                 and all(c.get("delim") == "(" and c["value"] is not None
                         and float(c["value"]).is_integer() for c in filled)):
+            accounted += 1
             spec_labels = [f"({int(c['value'])})" if c["value"] is not None else ""
                            for c in cells]
             continue
@@ -424,6 +456,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
                     raise Residue(
                         "two uncertainty rows under one coefficient — cannot "
                         "tell which quantity belongs in `unc`")
+                accounted += 1
                 unc[pending] = [c["value"] for c in cells]
                 seen_delims.update(c["delim"] for c in delimited)
             continue
@@ -435,6 +468,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
             # summary rows rather than discarding the whole table.
             if label in stats:
                 stats_ambiguous = True
+            accounted += 1
             stats[label] = [c["value"] if c["value"] is not None
                             else c.get("text") or None for c in cells]
             pending = None
@@ -446,6 +480,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         # named "y" or "n" is misread as a Yes/No indicator.
         if label and terms and filled and not numeric and all(
                 (c.get("text", "") or "").lower().strip(". ") in YESNO for c in filled):
+            accounted += 1
             fe[label] = [YESNO.get((c.get("text", "") or "").lower().strip(". "), 0)
                          for c in cells]
             pending = None
@@ -455,6 +490,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         if numeric and len(delimited) < len(numeric):
             if not label:
                 label = f"__unlabelled_{len(terms)}"
+            accounted += 1
             coef_widths.add(raw_width)
             row_panel.append(row_panel_label)
             terms.append(label)
@@ -464,32 +500,44 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
             pending = len(terms) - 1
             continue
 
-        # C1 guard: a pre-coefficient row carrying starred numeric cells is a
-        # coefficient row we failed to parse, never a dependent-variable
-        # header. Refuse rather than silently promote it.
-        if not terms and any(c["stars"] for c in filled):
+        # A-C2: the guard used to apply only before the first coefficient
+        # row, so a later row with unrecognised star markup was absorbed into
+        # `annotations` -- a dict no projection reads -- at confidence 1.0.
+        # Significance stars mean a coefficient row, wherever it sits.
+        if any(c["stars"] for c in filled) and not numeric:
             raise Residue(
-                "a header row carries significance stars — a coefficient row "
-                "was not parsed (unrecognised star markup?)")
+                "a row carries significance stars but no parsable number — a "
+                "coefficient row was not read (unrecognised star markup?)")
 
         # Pre-data text row: a header (dependent variables, group labels).
         if not terms and filled and not numeric:
-            header_rows.append([c.get("text", "") or "" for c in cells])
+            hdr = (flat_hdr[1:] + [""] * ncols)[:ncols]
+            header_rows.append([clean_text(h) for h in hdr])
+            accounted += 1
             continue
 
         # Labelled all-text row after the coefficients: an annotation such as
         # "Controls | Loan | Loan | ...". Metadata, not an unparsed row.
         if label and terms and filled and not numeric:
+            accounted += 1
             annotations[label] = [c.get("text", "") or "" for c in cells]
             pending = None
             continue
 
+        accounted += 1
         if filled:
             unclassified += 1
             unparsed_rows.append(" ".join(
                 (c.get("text") or ("" if c["value"] is None else str(c["value"])))
                 for c in [{"text": label, "value": None}] + cells).strip()[:200])
 
+    # Every row must land in exactly one category. Block-level conservation
+    # cannot see row-level loss, which is how two silent-drop bugs survived
+    # every gate.
+    if accounted != len(parsed_rows):
+        raise Residue(
+            f"row accounting does not balance: {len(parsed_rows)} rows in, "
+            f"{accounted} classified")
     if not terms:
         raise Residue("no coefficient rows found")
     # Coefficient rows of unequal width make the column model ambiguous: a
@@ -503,7 +551,13 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
                     f"in a row label, which also breaks LaTeX compilation")
         raise Residue(msg)
 
-    dep_vars = header_rows[-1] if header_rows else [""] * ncols
+    # Join every header level, not just the last: a two-level header carries
+    # the outcome on one row and the sample or estimator on another.
+    if header_rows:
+        dep_vars = [" ".join(dict.fromkeys(p for p in col if p)).strip()
+                    for col in zip(*header_rows)]
+    else:
+        dep_vars = [""] * ncols
     if spec_labels is None:
         spec_labels = [f"({i + 1})" for i in range(ncols)]
 
@@ -612,6 +666,11 @@ def parse_file(path: Path, rel: str) -> tuple[list[dict], list[dict]]:
     """Parse every tabular in one file. Returns (tables, residue, n_blocks)."""
     text = path.read_text(encoding="utf-8", errors="replace")
     sha = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:12]
+    comma = comma_convention(text)
+    # A-C3: comments were stripped inside parse_tabular, so find_tabulars
+    # still saw a commented-out \end{tabular} and truncated the block --
+    # losing every row after it with zero residue. Strip once, up front.
+    text = COMMENT_RE.sub("", text)
     labels = re.findall(r"\\label\{([^{}]+)\}", text)
     blocks = find_tabulars(text)
     tables, residue = [], []
@@ -636,14 +695,18 @@ def parse_file(path: Path, rel: str) -> tuple[list[dict], list[dict]]:
         try:
             if body is None:
                 raise Residue("unterminated tabular — no matching \\end{}")
-            parsed = parse_tabular(body, ncols_spec)
+            if comma == "ambiguous":
+                raise Residue(
+                    "file mixes decimal commas (0,342) and thousands "
+                    "separators (1,234) — a comma cannot be read both ways")
+            parsed = parse_tabular(body, ncols_spec, comma)
         except Residue as exc:
             residue.append({
                 "table_id": table_id,
                 "file": rel,
                 "line": line,
                 "reason": str(exc),
-                "raw": body[:400],
+                "raw": (body or "")[:400],
             })
             continue
         parsed.update({
@@ -998,11 +1061,15 @@ def _fmt(v, dec=4):
         return ""
     if not isinstance(v, (int, float)):
         return str(v)          # M3: stats may hold text ("n.a.", "---")
+    if v != 0 and dec and abs(v) < 10 ** -dec:
+        # A-M3: 1.23e-05 rendered as "0" (and -5e-07 as "-0") at confidence
+        # 1.0, while the store held the right value.
+        return f"{v:.2e}"
     text = f"{v:.{dec}f}"
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
-def distribution(rows: list[dict]) -> str:
+def distribution(rows: list[dict], terse: bool = False) -> str:
     """Inventory of what the tables contain — NOT a meta-analysis.
 
     Deliberately limited to facts printed in the source: how many estimates
@@ -1021,13 +1088,14 @@ def distribution(rows: list[dict]) -> str:
     groups: dict[tuple, list] = {}
     for r in rows:
         groups.setdefault((r["term"], r["dep_var"]), []).append(r)
-    out = ["### Coefficient inventory\n",
-           "Counts of what the source tables print. **Not** a meta-analysis: "
-           "no central tendency is reported, because estimates across "
-           "specifications, samples and outcomes are not exchangeable. "
-           "Interpretation is yours.\n",
-           "| term | outcome | estimates | tables | negative | positive | zero | starred | min | max | unc |",
-           "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
+    out = ([] if terse else
+           ["### Coefficient inventory\n",
+            "Counts of what the source tables print. **Not** a meta-analysis: "
+            "no central tendency is reported, because estimates across "
+            "specifications, samples and outcomes are not exchangeable. "
+            "Interpretation is yours.\n"]) + [
+        "| term | outcome | estimates | tables | negative | positive | zero | starred | min | max | unc |",
+        "|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---|"]
     for (term, dep), g in sorted(groups.items(), key=lambda kv: (-len(kv[1]), kv[0])):
         vals = sorted(r["est"] for r in g)
         neg = sum(1 for v in vals if v < 0)
@@ -1039,9 +1107,10 @@ def distribution(rows: list[dict]) -> str:
             f"| {term[:40]} | {(dep or '(unlabelled)')[:26]} | {len(g)} | "
             f"{len({r['table'] for r in g})} | {neg} | {pos} | {zero} | "
             f"{starred} | {_fmt(vals[0])} | {_fmt(vals[-1])} | {utypes} |")
-    out.append("\n`starred` counts estimates printed with at least one "
-               "significance star; the threshold each star denotes is set by "
-               "the source table, not by this tool.")
+    if not terse:
+        out.append("\n`starred` counts estimates printed with at least one "
+                   "significance star; the threshold each star denotes is set "
+                   "by the source table, not by this tool.")
     return "\n".join(out)
 
 
@@ -1057,6 +1126,22 @@ def _compact(rows: list[dict]) -> str:
     for r in rows:
         tabs.setdefault(r["table"], f"T{len(tabs) + 1}")
         deps.setdefault(r["dep_var"], f"D{len(deps) + 1}")
+    # F-C2: the legend printed basenames, so five different vintages of one
+    # table all rendered as the same string and a reader could not resolve a
+    # key. Add back the shortest path suffix that makes each name unique.
+    def label(full: str) -> str:
+        parts = full.split("#")[0].split("/")
+        name = parts[-1]
+        clash = [o for o in tabs if o != full
+                 and o.split("#")[0].split("/")[-1] == name]
+        if not clash:
+            return full.split("/")[-1]
+        for depth in range(2, len(parts) + 1):
+            cand = "/".join(parts[-depth:])
+            if not any("/".join(o.split("#")[0].split("/")[-depth:]) == cand
+                       for o in clash):
+                return cand + "#" + full.split("#")[-1]
+        return full
     by_type: dict[str, list] = {}
     for r in rows:
         by_type.setdefault(r["utype"], []).append(r)
@@ -1066,7 +1151,7 @@ def _compact(rows: list[dict]) -> str:
         out.append("NOT COMPARABLE across the groups below: they report "
                    "different quantities under each coefficient.\n")
     out.append("tables:  " + "  ".join(
-        f"{k}={v.rsplit('/', 1)[-1]}" for v, k in tabs.items()))
+        f"{k}={label(v)}" for v, k in tabs.items()))
     out.append("outcomes: " + "  ".join(
         f"{k}={v or '(unlabelled)'}" for v, k in deps.items()))
     for utype, group in sorted(by_type.items()):
@@ -1097,7 +1182,11 @@ def group_key(row: dict, mode: str) -> str:
     """
     path = row["table"].split("#")[0]
     if mode == "file":
-        return path.rsplit("/", 1)[-1]
+        # F-C1: keying on the basename merged genuinely different files that
+        # share a name -- exactly the duplication `extract` warns about --
+        # putting contradictory values in one block with nothing to tell them
+        # apart. The shared-prefix trim keeps the labels short.
+        return path
     if mode == "dir":
         return path.rsplit("/", 1)[0] if "/" in path else "."
     if mode == "table":
@@ -1124,7 +1213,12 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                     continue
                 nobs = ""
                 for key, vals in t["stats"].items():
-                    if key.lower().rstrip(":").strip() in {"observations", "n", "obs"}:
+                    # A-M4: a second literal set recognised 3 label forms
+                    # where is_stat_label knows ~20, so "Obs." never matched
+                    # and 92% of one corpus showed an empty N.
+                    if re.match(r"^(n|obs|observations?|no\.? ?of ?obs\w*|"
+                                r"num\.? ?obs\w*|sample size|clusters?)$",
+                                key.lower().strip(" .:"), re.I):
                         nobs = _fmt(vals[col], 0) if col < len(vals) else ""
                         break
                 rows.append({
@@ -1166,7 +1260,16 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
         if group_by in ("dir", "table", "file") and len(keys) > 1:
             common = os.path.commonprefix(keys)
             prefix = common[:common.rfind("/") + 1] if "/" in common else ""
-        out = [f"Grouped by {group_by}: {len(groups)} group(s), "
+        if as_summary:
+            out_pre = ["### Coefficient inventory\n",
+                       "Counts of what the source tables print. **Not** a "
+                       "meta-analysis: no central tendency is reported, "
+                       "because estimates across specifications, samples and "
+                       "outcomes are not exchangeable. Interpretation is "
+                       "yours.\n"]
+        else:
+            out_pre = []
+        out = out_pre + [f"Grouped by {group_by}: {len(groups)} group(s), "
                f"{len(rows)} coefficient(s)."
                + (f"  (paths relative to {prefix})" if prefix else "") + "\n"]
         for key in keys:
@@ -1174,7 +1277,7 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
             out.append(f"\n## {key[len(prefix):] or key}   "
                        f"({len(g)} coefficient(s))\n")
             out.append(project_rows(g, as_csv, show_all, as_summary,
-                                    as_compact, show_notes))
+                                    as_compact, show_notes, terse=True))
         return "\n".join(out)
 
     return project_rows(rows, as_csv, show_all, as_summary, as_compact,
@@ -1182,10 +1285,11 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
 
 
 def project_rows(rows: list[dict], as_csv=False, show_all=False,
-                 as_summary=False, as_compact=False, show_notes=False) -> str:
+                 as_summary=False, as_compact=False, show_notes=False,
+                 terse=False) -> str:
     """Render one set of rows in the requested format."""
     if as_summary:
-        return distribution(rows)
+        return distribution(rows, terse=terse)
 
     if as_csv:
         cols = ["term", "table", "spec", "dep_var", "est", "unc", "sig",
@@ -1240,8 +1344,12 @@ def project_rows(rows: list[dict], as_csv=False, show_all=False,
         seen: dict[str, list[str]] = {}
         for r in rows:
             if r["notes"] or r["flags"]:
-                seen.setdefault(r["notes"], []).append(
-                    r["table"].rsplit("/", 1)[-1])
+                # F-M1: appending per ROW reported a coefficient count as a
+                # table count ("9 tables" for 2 tables).
+                tabs_ = seen.setdefault(r["notes"], [])
+                short = r["table"].rsplit("/", 1)[-1]
+                if short not in tabs_:
+                    tabs_.append(short)
         if seen:
             out.append("### Table notes\n")
             for note, tabs in seen.items():
@@ -1286,7 +1394,9 @@ def verify_cell(root: Path, table: dict, term_i: int, col: int):
     # Scope to THIS table's span. A file holding many tabulars repeats term
     # labels across them, so a whole-file scan compares unrelated tables --
     # the same defect this check exists to catch.
-    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    raw_text = path.read_text(encoding="utf-8", errors="replace")
+    comma = comma_convention(raw_text)
+    all_lines = raw_text.splitlines()
     start = max(table["src"].get("line", 1) - 1, 0)
     end = len(all_lines)
     for m in re.finditer(r"\\end\{tabular\*?\}|\\end\{longtable\}", 
@@ -1309,7 +1419,12 @@ def verify_cell(root: Path, table: dict, term_i: int, col: int):
         m = NAIVE_NUM_RE.search(parts[col + 1].replace("\\", " "))
         if not m:
             continue
-        got = float(m.group(0).replace(",", ""))
+        # The check must share the document's comma convention. Stripping
+        # commas unconditionally made this confirm a 1000x-wrong value and
+        # flag the correct one as misaligned.
+        tok = m.group(0)
+        got = float(tok.replace(",", ".") if comma == "decimal"
+                    else tok.replace(",", ""))
         # M1: comparing magnitudes made the only independent check blind to
         # sign errors and to symmetric column swaps (+0.5 vs -0.5).
         if abs(got - expected) < 10 ** -6:
@@ -1474,7 +1589,17 @@ def run_stats(args) -> int:
     return 0
 
 
-PROJECTION_BUDGET = 120_000  # bytes, ~30k tokens
+PROJECTION_BUDGET_TOKENS = 30_000
+# Measured chars/token by output shape. Dense numeric markdown and the
+# legend-encoded form tokenise far below the naive 4, so a byte budget
+# admitted 1.6-2.4x more context than intended -- worst for --compact, the
+# mode the docs recommend.
+CHARS_PER_TOKEN = {"markdown": 2.4, "compact": 1.65, "csv": 2.8,
+                   "distribution": 2.27}
+
+
+def estimate_tokens(text: str, mode: str) -> int:
+    return int(len(text) / CHARS_PER_TOKEN.get(mode, 2.4))
 
 
 def term_index(store: dict) -> list[tuple[str, int, int]]:
@@ -1518,6 +1643,10 @@ DIALECT_PROBES = [
     ("siunitx S columns", re.compile(r"\bS\[[^\]]*\]|\\num\s*\{")),
     ("beamer overlays", OVERLAY_RE),
     ("decimal comma", re.compile(r"&\s*-?0,\d")),
+    ("\\multirow", re.compile(r"\\multirow\s*\{")),
+    ("longtable structure", re.compile(r"\\end(?:head|firsthead|foot|lastfoot)")),
+    ("threeparttable notes", re.compile(r"\\begin\{tablenotes\}")),
+    ("\\textsc labels", re.compile(r"\\textsc\s*\{")),
 ]
 
 
@@ -1548,9 +1677,19 @@ def run_dialects(args) -> int:
     print(f"{'convention':<34}{'files':>7}  example")
     for name, fs in sorted(hits.items(), key=lambda kv: -len(kv[1])):
         print(f"{name:<34}{len(fs):>7}  {fs[0].rsplit('/', 1)[-1][:40]}")
-    supported = {"stars: \\sym{***}", "stars: bare ***", "stars: $^{***}$ / ^{***}",
-                 "uncertainty in ( )", "uncertainty in [ ]", "beamer overlays",
-                 "decimal comma", "siunitx S columns"}
+    # F-M2: this set used to be hand-maintained and had drifted -- it claimed
+    # coverage for siunitx and decimal commas that no fixture contained.
+    # Derive it by running the probes over the fixtures themselves.
+    fixtures = Path(__file__).resolve().parent.parent / "tests" / "fixtures"
+    supported = set()
+    for fx in fixtures.glob("*.tex"):
+        try:
+            ftext = fx.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        for name, pat in DIALECT_PROBES:
+            if pat.search(ftext):
+                supported.add(name)
     unknown = [n for n in hits if n not in supported]
     print()
     if unknown:
@@ -1573,19 +1712,24 @@ def run_project(args) -> int:
     # A projection is only worth reading when it is SELECTIVE. An unfiltered
     # dump can exceed the source it was meant to compress, which defeats the
     # entire purpose of the tool, so refuse rather than flood the context.
-    if len(out) > PROJECTION_BUDGET and not args.force_full:
+    mode = ("csv" if args.csv else "compact" if args.compact
+            else "distribution" if args.summarize else "markdown")
+    est = estimate_tokens(out, mode)
+    if est > PROJECTION_BUDGET_TOKENS and not args.force_full:
         idx = term_index(store)
-        print(f"Projection would be ~{len(out) // 4:,} tokens "
-              f"(budget ~{PROJECTION_BUDGET // 4:,}). Refusing: at this size it "
-              f"no longer compresses anything.\n")
+        print(f"Projection would be ~{est:,} tokens "
+              f"(budget {PROJECTION_BUDGET_TOKENS:,}). Refusing: at this size "
+              f"it no longer compresses anything.\n")
         hint = ["Narrow it with --terms / --dep-var / --tables"]
         if not args.compact and not args.summarize:
             hint.append("use --compact for the same rows, much smaller")
         if not args.summarize:
             hint.append("use --distribution for a per-outcome count inventory")
-        if args.group_by:
-            hint.append("drop --group-by, or filter to fewer terms — grouping "
-                        "multiplies the output by the number of groups")
+        if args.group_by and args.summarize:
+            # Grouping PARTITIONS rows, so it costs ~74 tokens per group, not
+            # a multiple. The one real multiplication is --distribution per
+            # group, whose preamble is now hoisted, so only mention it there.
+            hint.append("or drop --group-by")
         print(". ".join(hint) + ".\n")
         print("Most common terms:\n")
         print(f"{'coefs':>6}  {'tables':>6}  term")

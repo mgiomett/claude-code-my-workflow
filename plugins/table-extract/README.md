@@ -55,7 +55,7 @@ raw span. The counts must balance, and extraction aborts if they do not.
 | `--dep-var` | project | Dependent-variable filter |
 | `--tables` | project | Comma-separated table-id filters |
 | `--distribution` | project | Per-term, per-outcome count inventory (no averages) |
-| `--compact` | project | Legend-encoded rows: same information, 2.5x smaller |
+| `--compact` | project | Legend-encoded rows, 2.2x smaller (omits src/conf) |
 | `--group-by` | project | Split into blocks by file, dir, table, term or dep_var |
 | `--notes` | project | Append each table's note row and flags |
 | `--csv` | project | Tidy long CSV instead of markdown |
@@ -145,10 +145,14 @@ cost that measuring bytes on disk misses).
 |---|---:|---:|---:|
 | Every estimate of one term, 91 of 149 tables | 31,582 | 148,422 | **4.7x** |
 | ...the same, with `--compact` | 14,649 | 148,422 | **10.1x** |
+
+Ratios in this table are projection-only. Counting the ~1,826-token SKILL.md
+that every invocation loads moves the crossover to **6-7 tables**, not the
+three an earlier version claimed.
 | Corpus-wide count inventory of one term | 1,615 | 148,422 | **92x** |
-| Per-scheme rates across 43 schemes | 153,567 | 1,294,384 | **7.8x** |
+| Per-scheme rates across 43 schemes | 153,567 | 1,294,384 | **8.4x** |
 | Judgment question needing the estimates | 30,131 | 55,400 | **1.8x** |
-| One specific table | 2,091 | 1,234 | **0.4x — a loss** |
+| One specific table | 2,091 | 1,234 | **0.6x — a loss**, 0.2x once SKILL.md is counted |
 
 **There is no single ratio.** For a selective row-level query over a large
 corpus it is ~4.7x plain, ~10x with `--compact`. Treat anything larger as a claim about the
@@ -163,7 +167,7 @@ corpus it is ~4.7x plain, ~10x with `--compact`. Treat anything larger as a clai
 | 212x | 7.8x | the 212x measured a *pooled* inventory against a question that asked for per-scheme rates, which this tool cannot group |
 | 15.2x | 1.8x | a judgment question was answered from counts, contradicting this skill's own "rows are the safe default" |
 | 84x | n/a | that artifact was produced by hand-written code, not by this tool |
-| overhead ~1,030 | ~2,600-3,000 | invoking the skill loads SKILL.md, 1,617 tokens, never counted |
+| overhead ~1,030 | **~3,160** | invoking the skill loads SKILL.md, measured at **1,826** tokens (not the 1,617 first published), plus extract and terms output |
 | line numbering 26% | 9.5% | the emulation padded line numbers; the real Read tool does not |
 
 The pattern worth remembering: **every inflated ratio came from substituting a
@@ -213,10 +217,12 @@ confidence 1.0. Run this first on a corpus the tool has not seen.
   row-level loss is visible rather than only reflected in a confidence penalty.
 - **Decimal commas** are distinguished from thousands separators by the leading
   group; `0,342` is 0.342, not 342.
-- **Grouping multiplies output.** `--group-by` answers per-file, per-vintage
-  and per-scheme questions in one call, but the result scales with the number
-  of groups, so the projection budget refuses a broad term filter combined
-  with many groups. Narrow the terms first.
+- **Grouping is nearly free on the token axis** — measured +0.4% (`dep_var`)
+  to +11.3% (`table`), about 74 tokens per group, because it partitions rows
+  rather than repeating them. An earlier version of this README claimed it
+  "multiplies the output by the number of groups"; that was asserted without
+  measurement and is false. The one real multiplication is `--distribution`
+  combined with `--group-by`, and its per-group preamble is now hoisted.
 
 ## What this is not
 
