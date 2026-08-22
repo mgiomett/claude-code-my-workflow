@@ -129,19 +129,53 @@ must fail).
 
 ## What it saves, honestly
 
-Measured on a 149-table corpus against the fair baseline (grep first, then read
-only matching files), with a real tokenizer:
+These figures were re-measured by an independent audit after the first set was
+found to be systematically flattering. The originals are corrected below rather
+than deleted, because *how* they were wrong is the more useful lesson.
 
-| Question | Skill | Read files |
-|---|---:|---:|
-| Corpus-wide inventory of X | ~1,200 | 160,570 |
-| Show me every estimate of X | 31,582 | 160,570 |
-| What is in one specific table? | 1,908 | 1,065 |
+Baseline throughout = the fair one: glob, grep to find matching files, then
+read only those, with the Read tool's line numbering counted (a real ~9.5%
+cost that measuring bytes on disk misses).
 
-**Floor ~5x, ceiling ~138x, and below about three tables it is a net loss.**
-The floor is question-independent; the ceiling applies only to distributional
-questions. Extraction itself is free — it is local Python — so the whole cost
-is whatever view you then read.
+| Question | Skill | Read files | Ratio |
+|---|---:|---:|---:|
+| Every estimate of one term, 91 of 149 tables | 31,582 | 148,422 | **4.7x** |
+| Corpus-wide count inventory of one term | 1,615 | 148,422 | **92x** |
+| Per-scheme rates across 43 schemes | 153,567 | 1,294,384 | **7.8x** |
+| Judgment question needing the estimates | 30,131 | 55,400 | **1.8x** |
+| One specific table | 2,091 | 1,234 | **0.4x — a loss** |
+
+**There is no single ratio, and the honest number is around 4.7x** for a
+selective query over a large corpus. Treat anything larger as a claim about the
+*question*, not about the tool.
+
+### What the audit corrected
+
+| Was claimed | Actually | Why |
+|---|---|---|
+| 138x | 92x | baselines inflated ~5-10% by a padding artifact in the Read emulation |
+| 5.1x | 4.7x | same |
+| 212x | 7.8x | the 212x measured a *pooled* inventory against a question that asked for per-scheme rates, which this tool cannot group |
+| 15.2x | 1.8x | a judgment question was answered from counts, contradicting this skill's own "rows are the safe default" |
+| 84x | n/a | that artifact was produced by hand-written code, not by this tool |
+| overhead ~1,030 | ~2,600-3,000 | invoking the skill loads SKILL.md, 1,617 tokens, never counted |
+| line numbering 26% | 9.5% | the emulation padded line numbers; the real Read tool does not |
+
+The pattern worth remembering: **every inflated ratio came from substituting a
+cheaper question for the one asked.** The two figures that survived scrutiny
+are the two where the output actually answered the stated question.
+
+### Where it is a loss
+
+- Below roughly **3 tables** for a selective single-term query.
+- Below roughly **15 tables**, or never, for "what is in this table" — the
+  whole table has to be projected, and that is bigger than the source.
+- For an all-terms question at any size: an unfiltered projection exceeds the
+  source it was meant to compress, and the tool refuses rather than emit it.
+
+A baseline larger than a context window (the 43-scheme case, 1.29M tokens) is
+not a saving so much as a difference in feasibility — nothing could have paid
+that cost, so the comparison is not to a real alternative.
 
 ## Known limits
 
@@ -154,6 +188,11 @@ is whatever view you then read.
   row-level loss is visible rather than only reflected in a confidence penalty.
 - **Decimal commas** are distinguished from thousands separators by the leading
   group; `0,342` is 0.342, not 342.
+- **No grouping by file, scheme, or version.** `project` filters by term,
+  dependent variable and table id, but cannot break results out per source
+  file. A per-scheme or per-vintage comparison needs one call per group, or
+  code written against the store — which is where several past errors came
+  from.
 
 ## What this is not
 
