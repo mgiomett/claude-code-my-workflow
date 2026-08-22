@@ -35,6 +35,8 @@ import sys
 from pathlib import Path
 
 SCHEMA_VERSION = 1
+# Minimum coefficients (and distinct values) needed to bind a log to a column.
+MIN_FINGERPRINT_TERMS = 3
 # Paths that LOOK superseded. Used only to REPORT, never to exclude:
 # deciding a directory is stale is a relevance judgement, and this tool
 # does not make those. Excluding by default also bypassed the conservation
@@ -46,11 +48,20 @@ VERSIONISH_RE = re.compile(r"legacy|deprecated|_?old(?:$|[/_.])|_archive|backup"
 # Row-level LaTeX noise that carries no data.
 RULE_RE = re.compile(
     r"\\(?:top|mid|bottom|cmid|)rule(?:\([a-z]+\))?(?:\{[^{}]*\})?"
-    r"|\\hline|\\addlinespace(?:\[[^\]]*\])?|\\rule\{[^{}]*\}\{[^{}]*\}"
+    r"(?:\[[^\]]*\])?"
+    r"|\\hline(?:\[[^\]]*\])?|\\addlinespace(?:\[[^\]]*\])?"
+    r"|\\rule\{[^{}]*\}\{[^{}]*\}"
     r"|\\(?:noalign|vspace|smallskip|medskip|bigskip)(?:\{[^{}]*\})?"
 )
-LEADING_OPT_RE = re.compile(r"^\s*\[[^\]]*\]")
+LEADING_OPT_RE = re.compile(
+    r"^\s*\[\s*-?[\d.]*\s*(?:pt|em|ex|ch|cm|mm|in|bp|dd|cc|sp|\\[a-zA-Z]+)?\s*\]")
+# C2: an unescaped % comments out the rest of the line. Without this, a
+# commented-out row is parsed as a live estimate and a comment without a
+# trailing \\ swallows the label of the row beneath it.
+COMMENT_RE = re.compile(r"(?<!\\)%.*?$", re.M)
 SYM_RE = re.compile(r"\\sym\s*\{(\*+)\}")
+OVERLAY_RE = re.compile(
+    r"\\(?:onslide|uncover|visible|invisible|alt|only|pause)\b|<\d+[->]")
 SPEC_LABEL_RE = re.compile(r"^\(\s*\d+\s*\)$")
 
 # Trailing summary-statistic row labels (normalised, lowercase).
@@ -67,8 +78,18 @@ STAT_PATTERNS = [
 ]
 
 
-def is_stat_label(norm: str) -> bool:
-    """True when a row label names a summary statistic, not a coefficient."""
+AMBIGUOUS_STAT = {"n", "r", "f", "df", "ll", "obs"}
+
+
+def is_stat_label(norm: str, seen_coefficients: bool = True) -> bool:
+    """True when a row label names a summary statistic, not a coefficient.
+
+    M9: single letters are also perfectly good regressor names (an interest
+    rate `r`, a population `N`). They only count as summary labels once
+    coefficient rows have been seen, mirroring the fixed-effect guard.
+    """
+    if norm.strip() in AMBIGUOUS_STAT and not seen_coefficients:
+        return False
     flat = re.sub(r"[\s.]+", " ", norm.replace("$", "").replace("^", "")).strip()
     return any(p.match(norm) or p.match(flat) for p in STAT_PATTERNS)
 
@@ -212,13 +233,26 @@ def parse_cell_value(raw: str) -> dict:
         stars = len(bare.group(0))
     if bare:
         s = s.replace(bare.group(0), "")
+    # C1: stargazer writes 0.342$^{***}$. clean_text drops $ and {} but not
+    # the caret, so removing the stars leaves "0.342^", float() fails, the
+    # cell becomes text, and an all-starred coefficient row is silently
+    # reclassified as a header. Strip the superscript marker.
+    s = re.sub(r"[\^_]+\s*$", "", s.strip())
     s = s.strip()
     delim = None
     for open_c, close_c in (("(", ")"), ("[", "]")):
         if s.startswith(open_c) and s.endswith(close_c) and len(s) > 1:
             delim, s = open_c, s[1:-1].strip()
             break
-    s = s.replace(",", "").replace(" ", "")
+    # M14: only a comma separating groups of exactly three digits is a
+    # thousands separator. "0,342" is a decimal comma and must NOT become 342.
+    # A thousands group never begins with a zero, so "0,342" is a decimal
+    # comma (342.0 would be 1000x wrong) while "41,022" is a separator.
+    if re.match(r"^-?0,", s.strip()):
+        s = s.replace(",", ".")
+    else:
+        s = re.sub(r"(?<=\d),(?=\d{3}(?!\d))", "", s)
+    s = s.replace(" ", "")
     if not s or s in {"-", "--", "."}:
         return {"value": None, "stars": 0, "delim": delim, "text": ""}
     try:
@@ -229,7 +263,10 @@ def parse_cell_value(raw: str) -> dict:
 
 def count_spec_columns(spec: str) -> int:
     """Count column slots declared in a tabular column specification."""
-    spec = re.sub(r"@\{[^{}]*\}", "", spec)
+    prev = None
+    while prev != spec:                       # nested: @{\extracolsep{\fill}}
+        prev = spec
+        spec = re.sub(r"@\{[^{}]*(?:\{[^{}]*\}[^{}]*)*\}", "", spec)
     spec = re.sub(r"[<>]\{[^{}]*\}", "", spec)
     spec = re.sub(r"[pmb]\{[^{}]*\}", "p", spec)
     spec = re.sub(r"[SD]\[[^\]]*\]", "S", spec)
@@ -254,7 +291,8 @@ class Residue(Exception):
 
 UNC_PATTERNS = [
     ("se", re.compile(r"standard error|std\.? ?err|robust s\.?e\.?", re.I)),
-    ("tstat", re.compile(r"\bt[-\s]?stat|\bt[-\s]?value|\bz[-\s]?stat", re.I)),
+    ("tstat", re.compile(r"\bt[-\s]?stat|\bt[-\s]?value", re.I)),
+    ("zstat", re.compile(r"\bz[-\s]?stat|\bz[-\s]?value", re.I)),
     ("pval", re.compile(r"p[-\s]?value", re.I)),
     ("ci", re.compile(r"confidence interval", re.I)),
 ]
@@ -310,14 +348,21 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
     stats: dict[str, list] = {}
     annotations: dict[str, list] = {}
     unclassified = 0
+    stats_ambiguous = False
+    unparsed_rows: list[str] = []
     coef_widths: set[int] = set()
+    seen_delims: set[str] = set()
+    row_panel: list[str] = []
+    current_panel = ""
     pending: int | None = None
 
-    raw_rows = split_rows(body)
+    raw_rows = split_rows(COMMENT_RE.sub("", body))
     parsed_rows = []
     for raw in raw_rows:
-        row = LEADING_OPT_RE.sub("", raw)
-        row = RULE_RE.sub(" ", row)
+        # M12: rules first — \midrule[\heavyrulewidth] leaves an optional
+        # argument that would otherwise glue onto the next row's label.
+        row = RULE_RE.sub(" ", raw)
+        row = LEADING_OPT_RE.sub("", row)
         if not row.strip():
             continue
         cells = split_cells(row)
@@ -326,19 +371,29 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
             text = clean_text(inner)
             if not text:
                 continue
-            (notes if span > 1 else panels).append(text)
+            if re.match(r"^\s*panel\b", text, re.I):
+                panels.append(text)
+                current_panel = text
+            else:
+                (notes if span > 1 else panels).append(text)
             continue
-        parsed_rows.append(_expand_row(cells))
+        parsed_rows.append((_expand_row(cells), current_panel))
 
+    if OVERLAY_RE.search(body):
+        # M4: a beamer overlay table can show different values on different
+        # slides, so extracting one of them would be a quiet error. The docs
+        # promised this refusal; the code did not implement it.
+        raise Residue("beamer overlay macros in tabular — values are "
+                      "slide-dependent and cannot be extracted unambiguously")
     if not parsed_rows:
         raise Residue("no data rows in tabular")
 
     # Column width is set by the widest row; a row wider than that is malformed.
-    ncols = max(len(r) for r in parsed_rows) - 1
+    ncols = max(len(r) for r, _ in parsed_rows) - 1
     if ncols < 1:
         raise Residue("no data columns")
 
-    for flat in parsed_rows:
+    for flat, row_panel_label in parsed_rows:
         label = clean_text(flat[0])
         values = flat[1:]
         raw_width = len(values)
@@ -347,9 +402,13 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         filled = [c for c in cells if c["value"] is not None or c.get("text")]
         norm = label.lower().rstrip(":").strip()
 
-        # Header: specification numbers "(1) (2) ..."
-        if filled and all(SPEC_LABEL_RE.match(c.get("text", "") or "") for c in filled):
-            spec_labels = [c.get("text", "") for c in cells]
+        # Header: specification numbers "(1) (2) ...". These parse as
+        # parenthesised integers, not as text, so match on that shape.
+        if (not terms and filled
+                and all(c.get("delim") == "(" and c["value"] is not None
+                        and float(c["value"]).is_integer() for c in filled)):
+            spec_labels = [f"({int(c['value'])})" if c["value"] is not None else ""
+                           for c in cells]
             continue
 
         numeric = [c for c in filled if c["value"] is not None]
@@ -358,10 +417,24 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         # Uncertainty row: unlabelled, every number wrapped in ( ) or [ ].
         if not label and numeric and len(delimited) == len(numeric):
             if pending is not None:
+                # C6: two uncertainty rows under one coefficient (e.g. SE then
+                # p-value). Silently keeping the last printed a p-value under a
+                # column headed "standard errors". Refuse instead.
+                if any(v is not None for v in unc[pending]):
+                    raise Residue(
+                        "two uncertainty rows under one coefficient — cannot "
+                        "tell which quantity belongs in `unc`")
                 unc[pending] = [c["value"] for c in cells]
+                seen_delims.update(c["delim"] for c in delimited)
             continue
 
-        if is_stat_label(norm):
+        if is_stat_label(norm, bool(terms)):
+            # C5: a repeat means stacked panels in one tabular. Keeping the
+            # last silently printed Panel B's N beside Panel A's coefficients.
+            # The COEFFICIENTS remain individually correct, so refuse only the
+            # summary rows rather than discarding the whole table.
+            if label in stats:
+                stats_ambiguous = True
             stats[label] = [c["value"] if c["value"] is not None
                             else c.get("text") or None for c in cells]
             pending = None
@@ -383,12 +456,21 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
             if not label:
                 label = f"__unlabelled_{len(terms)}"
             coef_widths.add(raw_width)
+            row_panel.append(row_panel_label)
             terms.append(label)
             est.append([c["value"] for c in cells])
             stars.append([c["stars"] for c in cells])
             unc.append([None] * ncols)
             pending = len(terms) - 1
             continue
+
+        # C1 guard: a pre-coefficient row carrying starred numeric cells is a
+        # coefficient row we failed to parse, never a dependent-variable
+        # header. Refuse rather than silently promote it.
+        if not terms and any(c["stars"] for c in filled):
+            raise Residue(
+                "a header row carries significance stars — a coefficient row "
+                "was not parsed (unrecognised star markup?)")
 
         # Pre-data text row: a header (dependent variables, group labels).
         if not terms and filled and not numeric:
@@ -404,6 +486,9 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
 
         if filled:
             unclassified += 1
+            unparsed_rows.append(" ".join(
+                (c.get("text") or ("" if c["value"] is None else str(c["value"])))
+                for c in [{"text": label, "value": None}] + cells).strip()[:200])
 
     if not terms:
         raise Residue("no coefficient rows found")
@@ -424,10 +509,32 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
 
     confidence = 1.0
     flags = []
+    if stats_ambiguous:
+        # Which panel each summary row belongs to cannot be recovered, and a
+        # wrong N printed beside a coefficient is worse than none.
+        stats = {}
+        confidence -= 0.20
+        flags.append("stacked panels: summary rows (N, R2) were ambiguous and "
+                     "have been dropped; coefficients are per-panel, see `panel`")
     if ncols_spec and ncols_spec - 1 != ncols:
         confidence -= 0.15
         flags.append(f"column count {ncols} differs from tabular spec {ncols_spec - 1}")
     uncertainty_type = detect_uncertainty_type(notes)
+    # The note names a delimiter; the rows show one. Disagreement means the
+    # note describes a different row than the one parsed.
+    if len(seen_delims) > 1:
+        confidence -= 0.15
+        flags.append(f"uncertainty rows mix delimiters {sorted(seen_delims)}")
+    elif seen_delims and notes:
+        stated = DELIM_WORD_RE.search(" ".join(notes))
+        obs = next(iter(seen_delims))
+        if stated:
+            word = stated.group(0).lower()
+            if (word.startswith("paren") and obs != "(") or \
+               (word.startswith("bracket") and obs != "["):
+                confidence -= 0.15
+                flags.append(
+                    f"notes say {word}… but the rows use {obs!r}")
     if uncertainty_type == "unknown" and any(any(u) for u in unc):
         confidence -= 0.10
         flags.append("uncertainty type not stated in table notes")
@@ -447,6 +554,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         "stars": stars,
         "fe": fe,
         "stats": stats,
+        "panel": row_panel,
         "annotations": annotations,
         "panels": panels,
         "header_rows": header_rows,
@@ -455,6 +563,7 @@ def parse_tabular(body: str, ncols_spec: int) -> dict:
         "n_cols": ncols,
         "confidence": round(max(0.0, confidence), 2),
         "flags": flags,
+        "unparsed_rows": unparsed_rows,
     }
 
 
@@ -472,9 +581,29 @@ def find_tabulars(text: str) -> list[tuple[int, str, int]]:
     for m in TABULAR_RE.finditer(text):
         spec, after = balanced_take(text, m.end())
         env = m.group(1)
-        end = text.find("\\end{" + env + "}", after)
+        # C8: a nested tabular inside a cell used to close the outer one,
+        # truncating it — the remaining rows appeared in neither the table nor
+        # the residue while conservation still "passed".
+        open_re = re.compile(r"\\begin\{" + re.escape(env) + r"\}")
+        close_re = re.compile(r"\\end\{" + re.escape(env) + r"\}")
+        depth, pos, end = 1, after, -1
+        while pos < len(text):
+            nxt_o = open_re.search(text, pos)
+            nxt_c = close_re.search(text, pos)
+            if not nxt_c:
+                break
+            if nxt_o and nxt_o.start() < nxt_c.start():
+                depth += 1
+                pos = nxt_o.end()
+                continue
+            depth -= 1
+            if depth == 0:
+                end = nxt_c.start()
+                break
+            pos = nxt_c.end()
         if end == -1:
-            end = len(text)
+            out.append((m.start(), None, count_spec_columns(spec)))
+            continue
         out.append((m.start(), text[after:end], count_spec_columns(spec)))
     return out
 
@@ -486,6 +615,7 @@ def parse_file(path: Path, rel: str) -> tuple[list[dict], list[dict]]:
     labels = re.findall(r"\\label\{([^{}]+)\}", text)
     blocks = find_tabulars(text)
     tables, residue = [], []
+    seen_ids: dict[str, int] = {}
     for idx, (offset, body, ncols_spec) in enumerate(blocks):
         line = text.count("\n", 0, offset) + 1
         if len(blocks) == 1 and len(labels) == 1:
@@ -495,7 +625,17 @@ def parse_file(path: Path, rel: str) -> tuple[list[dict], list[dict]]:
         else:
             anchor = f"t{idx}"
         table_id = f"{rel}#{anchor}"
+        # C4: a duplicated \label would otherwise give two blocks the same id,
+        # and the store's dict would keep only the last — two blocks in, one
+        # table out, zero residue, conservation still "passing".
+        if table_id in seen_ids:
+            seen_ids[table_id] += 1
+            table_id = f"{table_id}-{seen_ids[table_id]}"
+        else:
+            seen_ids[table_id] = 1
         try:
+            if body is None:
+                raise Residue("unterminated tabular — no matching \\end{}")
             parsed = parse_tabular(body, ncols_spec)
         except Residue as exc:
             residue.append({
@@ -549,20 +689,27 @@ def discover(paths, root: Path, exclude: str | None):
     pattern. If you point this at a directory, you get every table in it.
     """
     files: list[Path] = []
+    unmatched: list[str] = []
     for raw in paths:
         p = Path(raw)
         if p.is_dir():
             files.extend(sorted(p.rglob("*.tex")))
         elif any(ch in raw for ch in "*?["):
-            files.extend(sorted(Path().glob(raw)))
+            import glob as _glob
+            files.extend(sorted(Path(x) for x in _glob.glob(raw, recursive=True)))
         elif p.is_file():
             files.extend(follow_inputs(p.resolve(), set()))
+        else:
+            unmatched.append(raw)
     uniq, seen = [], set()
     for f in files:
         r = f.resolve()
         if r not in seen and r.is_file():
             seen.add(r)
             uniq.append(r)
+    if unmatched:
+        print("extract: these arguments matched nothing: "
+              + ", ".join(unmatched), file=sys.stderr)
     if not exclude:
         return uniq, []
     pat = re.compile(exclude, re.I)
@@ -650,6 +797,11 @@ def parse_log(path: Path, max_bytes: int = MAX_LOG_BYTES) -> list[dict]:
     if not LOG_PREFILTER_RE.search(text):
         return []
     if path.suffix.lower() == ".smcl":
+        # M7: Stata writes the column separator as {c |} and rules as
+        # {hline N}. Stripping every brace group removed the separator the
+        # coefficient-table parser keys on, so .smcl never parsed at all.
+        text = re.sub(r"\{c ([|+\-])\}", r"\1", text)
+        text = re.sub(r"\{hline( \d+)?\}", "-" * 8, text)
         text = SMCL_RE.sub("", text)
 
     blocks, current, last_cmd = [], None, None
@@ -702,23 +854,35 @@ def fingerprint_match(table: dict, blocks: list[dict]) -> dict | None:
     table's displayed precision, agree with the column's on >= 2 terms and
     disagree on none.
     """
-    best = None
+    best, matches = None, []
     for col in range(table["n_cols"]):
         col_vals = [(table["terms"][i], table["est"][i][col])
                     for i in range(len(table["terms"]))
                     if table["est"][i][col] is not None]
-        if len(col_vals) < 2:
+        # C7: value containment alone binds unrelated regressions. Require
+        # enough coefficients, and enough DISTINCT ones — a column printing
+        # 0.000 / 0.000 otherwise matched any log with two near-zero
+        # coefficients.
+        if len(col_vals) < MIN_FINGERPRINT_TERMS:
             continue
         dec = _displayed_decimals(v for _, v in col_vals)
+        distinct = {round(v, dec) for _, v in col_vals}
+        if len(distinct) < MIN_FINGERPRINT_TERMS:
+            continue
         for block in blocks:
-            rounded = {k: round(v[0], dec) for k, v in block["coefs"].items()}
-            agree = sum(1 for _, v in col_vals if round(v, dec) in rounded.values())
-            if agree >= 2 and agree == len(col_vals):
-                score = agree
-                if best is None or score > best["agree"]:
-                    best = {"col": col, "cmd": block["cmd"],
-                            "agree": agree, "coefs": block["coefs"]}
-    return best
+            rounded = {round(v[0], dec) for v in block["coefs"].values()}
+            agree = sum(1 for _, v in col_vals if round(v, dec) in rounded)
+            if agree == len(col_vals):
+                matches.append({"col": col, "cmd": block["cmd"],
+                                "agree": agree, "coefs": block["coefs"],
+                                "file": block.get("file")})
+    if not matches:
+        return None
+    # Ambiguity is not a tie to break: if two distinct logs both explain the
+    # column, we cannot say which produced it.
+    if len({(m["cmd"], id(m["coefs"])) for m in matches}) > 1:
+        return None
+    return max(matches, key=lambda m: m["agree"])
 
 
 def enrich_with_logs(tables: list[dict], log_files: list[Path], root: Path,
@@ -736,8 +900,8 @@ def enrich_with_logs(tables: list[dict], log_files: list[Path], root: Path,
         hit = fingerprint_match(t, blocks)
         if not hit:
             continue
-        t["log"] = {"file": next(b["file"] for b in blocks if b["cmd"] == hit["cmd"]),
-                    "cmd": hit["cmd"], "matched_column": hit["col"]}
+        t["log"] = {"file": hit.get("file"), "cmd": hit["cmd"],
+                    "matched_column": hit["col"]}
         full = [[None] * t["n_cols"] for _ in t["terms"]]
         dec = _displayed_decimals(t["est"][i][hit["col"]] for i in range(len(t["terms"])))
         for i, term in enumerate(t["terms"]):
@@ -768,7 +932,10 @@ def load_store(root: Path) -> dict:
             data = json.loads(f.read_text())
             if data.get("schema") == SCHEMA_VERSION:
                 return data
-        except (json.JSONDecodeError, OSError):
+        except json.JSONDecodeError:
+            print(f"warning: {f} is corrupt and was ignored; re-extract to "
+                  f"rebuild it", file=sys.stderr)
+        except OSError:
             pass
     return {"schema": SCHEMA_VERSION, "tables": [], "residue": [], "files": {}}
 
@@ -778,18 +945,27 @@ def save_store(root: Path, store: dict) -> Path:
     f.parent.mkdir(parents=True, exist_ok=True)
     # Compact: the store is machine-read backing data. Humans read the
     # projection, and pretty-printing numeric arrays costs ~60% in size.
-    f.write_text(json.dumps(store, separators=(",", ":"),
-                            sort_keys=True, ensure_ascii=False))
+    tmp = f.with_suffix(".json.tmp")
+    tmp.write_text(json.dumps(store, separators=(",", ":"),
+                              sort_keys=True, ensure_ascii=False))
+    os.replace(tmp, f)          # atomic: a crash mid-write cannot truncate
     return f
 
 
 def upsert(store: dict, tables: list[dict], residue: list[dict],
            files_done: dict) -> list[str]:
     """Replace tables by id (never append) and report changed values."""
-    old = {t["table_id"]: t for t in store["tables"]}
+    # C3: a table deleted from its source file must not survive in the store.
+    # Overwriting by id alone left stale tables projected as current results,
+    # and — because anchors are positional — could duplicate a survivor.
+    reparsed = set(files_done)
+    prior = {t["table_id"]: t for t in store["tables"]
+             if t["src"]["file"] in reparsed}
+    old = {t["table_id"]: t for t in store["tables"]
+           if t["src"]["file"] not in reparsed}
     diffs = []
     for t in tables:
-        prev = old.get(t["table_id"])
+        prev = prior.get(t["table_id"])
         if prev:
             for i, term in enumerate(t["terms"]):
                 if term not in prev["terms"]:
@@ -820,6 +996,8 @@ def _fmt(v, dec=4):
     """
     if v is None:
         return ""
+    if not isinstance(v, (int, float)):
+        return str(v)          # M3: stats may hold text ("n.a.", "---")
     text = f"{v:.{dec}f}"
     return text.rstrip("0").rstrip(".") if "." in text else text
 
@@ -900,6 +1078,10 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                     "utype": t["uncertainty_type"],
                     "stype": t["source_type"],
                     "conf": t["confidence"],
+                    "full": (t["est_full"][i][col]
+                             if t.get("est_full") and t["est_full"][i][col] is not None
+                             else None),
+                    "cmd": (t.get("log") or {}).get("cmd") or "",
                 })
     if not rows:
         return "No coefficients matched. Try broader --terms, or run `extract` first."
@@ -929,20 +1111,26 @@ def project(store: dict, terms, dep_var=None, table_filter=None,
                    "as-is.\n")
     for utype, group in sorted(by_type.items()):
         label = {"se": "standard errors", "tstat": "t-statistics",
+                 "zstat": "z-statistics",
                  "pval": "p-values", "ci": "confidence intervals",
                  "unknown": "UNSTATED — treat with caution"}[utype]
         out.append(f"### Uncertainty reported: {label}\n")
         low = [r for r in group if r["conf"] < 1.0 or r["stype"] != "tex"]
+        has_log = show_all and any(r["full"] is not None or r["cmd"] for r in group)
         out.append("| term | table | spec | dep var | est | unc | sig | N |"
-                   + (" src | conf |" if low or show_all else ""))
+                   + (" src | conf |" if low or show_all else "")
+                   + (" full precision | command |" if has_log else ""))
         out.append("|---|---|---|---|---:|---:|---|---:|"
-                   + ("---|---:|" if low or show_all else ""))
+                   + ("---|---:|" if low or show_all else "")
+                   + ("---:|---|" if has_log else ""))
         for r in sorted(group, key=lambda x: (x["term"], x["table"], x["spec"])):
             short = r["table"].rsplit("/", 1)[-1]
             line = (f"| {r['term']} | {short} | {r['spec']} | {r['dep_var']} "
                     f"| {_fmt(r['est'])} | {_fmt(r['unc'])} | {r['sig']} | {r['n']} |")
             if low or show_all:
                 line += f" {r['stype']} | {r['conf']} |"
+            if show_all and (r["full"] is not None or r["cmd"]):
+                line += f" {r['full'] if r['full'] is not None else ''} | {r['cmd'][:60]} |"
             out.append(line)
         out.append("")
     return "\n".join(out)
@@ -975,7 +1163,17 @@ def verify_cell(root: Path, table: dict, term_i: int, col: int):
     # store recorded, otherwise this compares unrelated rows.
     occurrence = table["terms"][:term_i].count(term)
     seen = 0
-    for raw in path.read_text(encoding="utf-8", errors="replace").splitlines():
+    # Scope to THIS table's span. A file holding many tabulars repeats term
+    # labels across them, so a whole-file scan compares unrelated tables --
+    # the same defect this check exists to catch.
+    all_lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+    start = max(table["src"].get("line", 1) - 1, 0)
+    end = len(all_lines)
+    for m in re.finditer(r"\\end\{tabular\*?\}|\\end\{longtable\}", 
+                         "\n".join(all_lines[start:])):
+        end = start + "\n".join(all_lines[start:])[:m.end()].count("\n") + 1
+        break
+    for raw in all_lines[start:end]:
         if "\\multicolumn" in raw:
             continue
         if "&" not in raw:
@@ -992,7 +1190,9 @@ def verify_cell(root: Path, table: dict, term_i: int, col: int):
         if not m:
             continue
         got = float(m.group(0).replace(",", ""))
-        if abs(abs(got) - abs(expected)) < 10 ** -6:
+        # M1: comparing magnitudes made the only independent check blind to
+        # sign errors and to symmetric column swaps (+0.5 vs -0.5).
+        if abs(got - expected) < 10 ** -6:
             return True, f"{term} col{col + 1} = {got}"
         return False, f"{term} col{col + 1}: store={expected} source={got}"
     return None, f"{term} not found by naive scan"
@@ -1031,6 +1231,15 @@ def run_verify(root: Path, store: dict, sample: int) -> int:
         print("\nBLOCKING: a misaligned cell means the column model is wrong; "
               "every downstream comparison is suspect.")
         return 1
+    # M2: a green exit that confirmed nothing is indistinguishable from a green
+    # exit that confirmed everything.
+    if ok == 0:
+        print("\nBLOCKING: nothing could be verified — sources unreadable or "
+              "unmatched. This is not a pass.")
+        return 1
+    if skip > len(picked) // 4:
+        print(f"\nWARNING: {skip}/{len(picked)} sampled cells were "
+              f"unverifiable; treat this run as weak evidence.")
     return 0
 
 

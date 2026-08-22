@@ -399,6 +399,7 @@ class TestLogEnrichment(unittest.TestCase):
         blocks = pt.parse_log(self.LOGS / "estimates.log")
         self.assertEqual(len(blocks), 1)
         self.assertEqual(blocks[0]["dep_var"], "outcome")
+        self.assertGreaterEqual(len(blocks[0]["coefs"]), 3)
         self.assertIn("reghdfe", blocks[0]["cmd"])
         self.assertAlmostEqual(blocks[0]["coefs"]["treat"][0], 0.3417123)
 
@@ -420,6 +421,27 @@ class TestLogEnrichment(unittest.TestCase):
         other = [{"cmd": "reg y x", "dep_var": "y", "file": "x.log",
                   "coefs": {"x": (99.9, 1.0), "z": (88.8, 1.0)}}]
         self.assertIsNone(pt.fingerprint_match(tables[0], other))
+
+    def test_refuses_coincidental_match_on_near_zero_column(self):
+        """C7: a column printing 0.000/0.000/0.000 must not bind to any log
+        that happens to contain small coefficients."""
+        table = {"terms": ["a", "b", "c"], "n_cols": 1,
+                 "est": [[0.0], [0.0], [0.0]]}
+        blocks = [{"cmd": "reg q z", "dep_var": "q", "file": "z.log",
+                   "coefs": {"z": (0.0001, 1.0), "w": (-0.0002, 1.0),
+                             "v": (5.0, 1.0)}}]
+        self.assertIsNone(pt.fingerprint_match(table, blocks))
+
+    def test_refuses_when_two_logs_both_explain_a_column(self):
+        """C7: ambiguity is not a tie to break."""
+        table = {"terms": ["a", "b", "c"], "n_cols": 1,
+                 "est": [[0.5], [0.25], [-0.75]]}
+        coefs = {"x": (0.5, 1.0), "y": (0.25, 1.0), "z": (-0.75, 1.0)}
+        blocks = [{"cmd": "reg one", "dep_var": "o", "file": "a.log",
+                   "coefs": dict(coefs)},
+                  {"cmd": "reg two", "dep_var": "o", "file": "b.log",
+                   "coefs": dict(coefs)}]
+        self.assertIsNone(pt.fingerprint_match(table, blocks))
 
 
 if __name__ == "__main__":

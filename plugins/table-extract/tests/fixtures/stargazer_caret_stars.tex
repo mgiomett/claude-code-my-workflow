@@ -1,0 +1,17 @@
+% C1 regression: stargazer writes $^{***}$. The caret left after star removal
+% made the cell non-numeric, so an all-starred row was promoted to a header.
+% This comment row is also C2 regression cover.
+\begin{tabular}{lcc}
+\toprule
+ & (3) & (4) \\
+ & wage & wage \\
+\midrule
+treat & 0.342$^{***}$ & 0.298$^{***}$ \\
+      & (0.091) & (0.088) \\
+% old: treat & 0.900 & 0.800 \\
+post  & -0.045 & -0.051 \\
+      & (0.033) & (0.029) \\
+Observations & 2,847 & 2,847 \\
+\bottomrule
+\multicolumn{3}{l}{\footnotesize Standard errors in parentheses} \\
+\end{tabular}

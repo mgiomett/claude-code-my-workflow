@@ -143,6 +143,18 @@ The floor is question-independent; the ceiling applies only to distributional
 questions. Extraction itself is free — it is local Python — so the whole cost
 is whatever view you then read.
 
+## Known limits
+
+- **Stacked panels** (two panels in one `tabular`) keep their coefficients and
+  record a `panel` per row, but their summary rows (N, R2) are ambiguous and
+  are dropped with a flag rather than guessed. A wrong N beside a coefficient
+  is worse than none.
+- **Beamer overlay tables** are refused: values are slide-dependent.
+- **Rows that match no branch** are recorded in `unparsed_rows` and counted, so
+  row-level loss is visible rather than only reflected in a confidence penalty.
+- **Decimal commas** are distinguished from thousands separators by the leading
+  group; `0,342` is 0.342, not 342.
+
 ## What this is not
 
 - **Not a verifier.** It extracts; it does not adjudicate whether a number is

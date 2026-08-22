@@ -117,6 +117,11 @@ split with a warning and must not be merged.
 **Trust the confidence column.** Anything below 1.0 carries a flag explaining
 why. Any source other than the LaTeX itself is shown explicitly.
 
+**Watch for the stacked-panel flag.** When one table stacks Panel A over
+Panel B, the summary rows repeat and cannot be attributed to a panel, so they
+are dropped and the table is flagged. The coefficients remain, each tagged with
+its panel.
+
 **Read the residue.** Tables the parser could not trust are recorded with a
 reason, never silently dropped. A residue entry is a table you still need to
 open by hand. Common causes: a layout with no coefficient rows (a variable
